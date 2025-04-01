@@ -1,0 +1,275 @@
+from django.conf import settings
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+class UserManager(BaseUserManager):
+    def create_user(self, email, phone_number, full_name, password=None, role='student', **extra_fields):
+        if not email:
+            raise ValueError("Email kiritish majburiy")
+        email = self.normalize_email(email)
+        user = self.model(email=email, phone_number=phone_number, full_name=full_name, role=role, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, phone_number, full_name, password):
+        user = self.create_user(email, phone_number, full_name, password, role='admin')
+        user.is_staff = True
+        user.is_superuser = True
+        user.save(using=self._db)
+        return user
+
+
+class User(AbstractBaseUser, PermissionsMixin):
+    ROLE_CHOICES = [
+        ('student', 'Student'),
+        ('admin', 'Admin'),
+    ]
+
+    email = models.EmailField(unique=True)
+    phone_number = models.CharField(max_length=15, unique=True)
+    full_name = models.CharField(max_length=255)
+    study_place = models.CharField(max_length=255, blank=True, null=True)
+    grade = models.CharField(max_length=20, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+
+    objects = UserManager()
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['phone_number', 'full_name']
+
+
+    def __str__(self):
+        return f"{self.full_name} - {self.role}"
+
+
+
+class Test(models.Model):
+    title = models.CharField(max_length=255)
+    fan = models.CharField(max_length=255)
+    savol_soni = models.IntegerField(default=0)
+    qiyinlik = models.CharField(max_length=50)
+    narx = models.IntegerField(default=0)
+    mukofot = models.IntegerField(default=0)
+    tavsif = models.TextField(blank=True, null=True)
+    vaqt_chegarasi = models.IntegerField(default=60)  # Qo'shildi
+    qoshilgan_sana = models.DateField(auto_now_add=True)
+    status = models.CharField(max_length=50, default='Faol')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='tests', on_delete=models.CASCADE)
+
+    def __str__(self):
+        return self.title
+
+class Savol(models.Model):
+    QIYINLIK_CHOICES = [
+        ('oson', 'Oson'),
+        ('orta', 'O\'rta'),
+        ('qiyin', 'Qiyin'),
+        ('murakkab', 'Murakkab'),
+    ]
+
+    test = models.ForeignKey(Test, related_name='savollar', on_delete=models.CASCADE)
+    savol_matni = models.TextField()
+    qiyinlik = models.CharField(max_length=10, choices=QIYINLIK_CHOICES, default='oson')
+    variant_a = models.CharField(max_length=255)
+    variant_b = models.CharField(max_length=255)
+    variant_c = models.CharField(max_length=255)
+    variant_d = models.CharField(max_length=255)
+    togri_javob = models.CharField(max_length=1, choices=[('A', 'A'), ('B', 'B'), ('C', 'C'), ('D', 'D')])
+
+    def __str__(self):
+        return self.savol_matni[:50] # Qisqacha savolni chiqarish
+
+
+
+class OquvMaterial(models.Model):
+    MATERIAL_TURLARI = [
+        ('kitob', 'Kitob'),
+        ('video', 'Video dars'),
+        ('qollanma', 'Qo\'llanma'),
+        ('maqola', 'Maqola'),
+        ('boshqa', 'Boshqa'),
+    ]
+
+    FORMAT_TURLARI = [
+        ('pdf', 'PDF'),
+        ('mp4', 'MP4'),
+        ('ppt', 'PPT'),
+        ('doc', 'DOC'),
+        ('boshqa', 'Boshqa'),
+    ]
+
+    fan = models.CharField(max_length=255)
+    material_nomi = models.CharField(max_length=255)
+    tur = models.CharField(max_length=50, choices=MATERIAL_TURLARI, default='kitob')
+    format = models.CharField(max_length=50, choices=FORMAT_TURLARI, default='pdf')
+    hajm = models.CharField(max_length=50)  # Misol: "5 MB", "100 KB"
+    yuklab_olish_imkoniyati = models.BooleanField(default=True)
+    status = models.CharField(max_length=50, default='Faol')
+    yuklangan_sana = models.DateField(auto_now_add=True)
+
+    def __str__(self):
+        return self.material_nomi
+
+
+class Tolov(models.Model):
+    TUR_CHOYSLARI = [
+        ('kirim', 'Kirim'),
+        ('chiqim', 'Chiqim'),
+    ]
+
+    STATUS_CHOYSLARI = [
+        ('muvaffaqiyatli', 'Muvaffaqiyatli'),
+        ('bekor_qilingan', 'Bekor qilingan'),
+        ('kutilmoqda', 'Kutilmoqda'),
+    ]
+
+    foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='tolovlar', on_delete=models.CASCADE)
+    tavsif = models.CharField(max_length=255)
+    tur = models.CharField(max_length=10, choices=TUR_CHOYSLARI, default='kirim')
+    summa = models.DecimalField(max_digits=12, decimal_places=2)
+    sana = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOYSLARI, default='muvaffaqiyatli')
+
+    def __str__(self):
+        return f"{self.tavsif} - {self.summa} so'm"
+
+
+
+class Reyting(models.Model):
+    foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='reytinglar', on_delete=models.CASCADE)
+    umumiy_ball = models.IntegerField(default=0)
+    testlar_ball = models.IntegerField(default=0)
+    kurslar_ball = models.IntegerField(default=0)
+    # Qo'shimcha ball turlari (agar kerak bo'lsa)
+    platforma_vaqti_ball = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.foydalanuvchi.full_name} - {self.umumiy_ball}"
+
+    def hisoblash_umumiy_ball(self):
+        # Test natijalari va kurslardagi faollikni hisobga olgan holda umumiy ballni hisoblash
+        self.umumiy_ball = self.testlar_ball + self.kurslar_ball + self.platforma_vaqti_ball
+        self.save()
+
+
+class IELTSUmumiy(models.Model):
+    foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='ielts_umumiy', on_delete=models.CASCADE)
+    joriy_baho = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    maqsad_baho = models.DecimalField(max_digits=3, decimal_places=1, default=7.5)
+    listening = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    reading = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    writing = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    speaking = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    keyingi_imtihon_sanasi = models.DateField(blank=True, null=True)
+    umumiy_progress = models.IntegerField(default=0)  # Foizda
+
+    def __str__(self):
+        return f"{self.foydalanuvchi.full_name} - IELTS Umumiy"
+
+class IELTSTest(models.Model):
+    TIL_CHOYSLARI = [
+        ('ingliz', 'Ingliz tili'),
+        ('turk', 'Turk tili'),
+        ('arab', 'Arab tili'),
+    ]
+    ielts_umumiy = models.ForeignKey(IELTSUmumiy, related_name='ielts_testlar', on_delete=models.CASCADE)
+    nomi = models.CharField(max_length=255)
+    til = models.CharField(max_length=20, choices=TIL_CHOYSLARI, default='ingliz')
+    baho = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
+    sana = models.DateField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.nomi} ({self.til})"
+
+class IELTSMaterial(models.Model):
+    ielts_umumiy = models.ForeignKey(IELTSUmumiy, related_name='ielts_materiallar', on_delete=models.CASCADE)
+    nomi = models.CharField(max_length=255)
+    fayl = models.FileField(upload_to='ielts_materiallar/')  # Fayllar uchun joy
+    yuklangan_sana = models.DateField(auto_now_add=True)
+
+    def __str__(self):
+        return self.nomi
+
+
+
+
+class Universitet(models.Model):
+    nomi = models.CharField(max_length=255)
+    hudud = models.CharField(max_length=255)
+    website = models.URLField(blank=True, null=True)
+    yonalishlar = models.TextField(blank=True, null=True) # Agar ko'p bo'lsa ManyToManyField qilish mumkin
+    kirish_ballari = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return self.nomi
+
+
+
+class Yutuq(models.Model):
+    TUR_CHOYSLARI = [
+        ('umumiy', 'Umumiy'),
+        ('testlar', 'Testlar'),
+        ('streak', 'Streak'),
+        ('mock_testlar', 'Mock Testlar'),
+    ]
+
+    nomi = models.CharField(max_length=255)
+    tavsif = models.TextField()
+    tur = models.CharField(max_length=20, choices=TUR_CHOYSLARI, default='umumiy')
+    ball = models.IntegerField(default=0)  # Yutuq uchun beriladigan ball
+    shart = models.TextField()  # Yutuqni olish sharti
+    rasm = models.ImageField(upload_to='yutuqlar/', blank=True, null=True)  # Rasm (ixtiyoriy)
+
+    def __str__(self):
+        return self.nomi
+
+
+class FoydalanuvchiYutugi(models.Model):
+    foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='foydalanuvchi_yutuqlari', on_delete=models.CASCADE)
+    yutuq = models.ForeignKey(Yutuq, related_name='foydalanuvchilar', on_delete=models.CASCADE)
+    olingan_sana = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.foydalanuvchi.full_name} - {self.yutuq.nomi}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
