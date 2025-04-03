@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from django.contrib.auth import get_user_model, password_validation
+from django.contrib.auth import get_user_model, password_validation, authenticate
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from users.models import *
 
@@ -33,6 +34,27 @@ class SignupSerializer(serializers.ModelSerializer):
 class LoginSerializer(serializers.Serializer):
     email = serializers.CharField()
     password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        email = data.get('email', None)
+        password = data.get('password', None)
+
+        if email and password:
+            user = authenticate(email=email, password=password)
+            if user:
+                if user.is_active:
+                    refresh = RefreshToken.for_user(user)
+                    data['refresh'] = str(refresh)
+                    data['access'] = str(refresh.access_token)
+                    data['role'] = user.role  # Foydalanuvchi rolini qo'shamiz
+                else:
+                    raise serializers.ValidationError("Foydalanuvchi faol emas")
+            else:
+                raise serializers.ValidationError("Noto'g'ri login yoki parol")
+        else:
+            raise serializers.ValidationError("Login va parol majburiy")
+
+        return data
 
 
 class DashboardSerializer(serializers.ModelSerializer):
@@ -166,13 +188,13 @@ class ReytingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Reyting
-        fields = ('id', 'foydalanuvchi', 'foydalanuvchi_full_name', 'umumiy_ball', 'testlar_ball', 'kurslar_ball', 'platforma_vaqti_ball')
+        fields = ('id', 'foydalanuvchi', 'foydalanuvchi_full_name', 'umumiy_ball', 'testlar_ball', 'kurslar_ball', 'platforma_vaqti_ball', 'matematika_reyting', 'fizika_reyting', 'ingliz_tili_reyting')
         read_only_fields = ('id', 'foydalanuvchi', 'umumiy_ball')
 
 class ReytingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Reyting
-        fields = ('testlar_ball', 'kurslar_ball', 'platforma_vaqti_ball')
+        fields = ('testlar_ball', 'kurslar_ball', 'platforma_vaqti_ball', 'matematika_reyting', 'fizika_reyting', 'ingliz_tili_reyting')
 
     def validate(self, data):
         # Ballar musbat son ekanligini tekshirish
@@ -250,6 +272,109 @@ class FoydalanuvchiYutugiSerializer(serializers.ModelSerializer):
         model = FoydalanuvchiYutugi
         fields = ('id', 'foydalanuvchi', 'yutuq', 'olingan_sana', 'yutuq_nomi')
         read_only_fields = ('id', 'foydalanuvchi', 'yutuq', 'olingan_sana')
+
+
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('email', 'full_name', 'phone_number', 'study_place', 'grade', 'address')
+        read_only_fields = ('email',)
+
+
+
+
+
+class TestListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Test
+        fields = ('id', 'title', 'fan', 'savol_soni', 'qiyinlik', 'qoshilgan_sana')
+
+class TestDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Test
+        fields = ('id', 'title', 'fan', 'savol_soni', 'qiyinlik', 'qoshilgan_sana', 'savollar') #savollar ham bo'lishi kerak
+
+class TestResultSerializer(serializers.Serializer):
+    #Natijalarni qaytarish uchun serializer
+     test_id = serializers.IntegerField()
+     user_answers = serializers.JSONField() #{'1': 'A', '2': 'B', '3':'C'
+
+
+
+class MockTestListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Test
+        fields = ('id', 'title', 'fan', 'savol_soni', 'qiyinlik', 'qoshilgan_sana')
+
+class MockTestDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Test
+        fields = '__all__'
+
+
+
+
+
+class KursListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Kurs
+        fields = ('id', 'nomi', 'tavsif', 'narx', 'davomiyligi')
+
+class KursDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Kurs
+        fields = ('id', 'nomi', 'tavsif', 'narx', 'davomiyligi')
+
+class KursCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Kurs
+        fields = ('nomi', 'tavsif', 'narx', 'davomiyligi')
+
+class KursUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Kurs
+        fields = ('nomi', 'tavsif', 'narx', 'davomiyligi')
+
+
+
+
+class JadvalListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Jadval
+        fields = ('id', 'kun', 'fan', 'boshlanish_vaqti', 'tugash_vaqti', 'tur')
+
+class JadvalDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Jadval
+        fields = ('id', 'kun', 'fan', 'boshlanish_vaqti', 'tugash_vaqti', 'tur')
+
+class JadvalCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Jadval
+        fields = ('kun', 'fan', 'boshlanish_vaqti', 'tugash_vaqti', 'tur')
+
+class JadvalUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Jadval
+        fields = ('kun', 'fan', 'boshlanish_vaqti', 'tugash_vaqti', 'tur')
+
+
+
+
+class LastRegisteredUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('id', 'full_name', 'email', 'phone_number', 'role', 'date_joined')
+
+
+
+
+
+
+
+
 
 
 

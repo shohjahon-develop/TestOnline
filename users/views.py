@@ -1,8 +1,10 @@
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import NotFound
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.decorators import api_view, permission_classes
 from .serializers import *
 
 User = get_user_model()
@@ -20,17 +22,27 @@ class LoginView(generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data.get('email')
-        password = serializer.validated_data.get('password')
-        user = authenticate(email=email, password=password)
-        if user is not None:
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            })
-        else:
-            return Response({"error": "Noto'g'ri login yoki parol"}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({
+            'refresh': serializer.validated_data['refresh'],
+            'access': serializer.validated_data['access'],
+            'role': serializer.validated_data['role']  # Foydalanuvchi rolini qo'shamiz
+        })
+
+
+
+class LastRegisteredUsersView(generics.ListAPIView):
+    serializer_class = LastRegisteredUserSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def get_queryset(self):
+        return User.objects.order_by('-date_joined')[:50]
+
+class ProfileView(generics.RetrieveUpdateAPIView):
+    serializer_class = ProfileSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
 
 
 
@@ -168,27 +180,21 @@ class TolovCreateView(generics.CreateAPIView):
 
 class ReytingListView(generics.ListAPIView):
     serializer_class = ReytingSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-    queryset = Reyting.objects.all()
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Reyting.objects.all()
 
 class ReytingDetailView(generics.RetrieveAPIView):
     serializer_class = ReytingSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        # Foydalanuvchi uchun o'z reytingini olish
-        if self.request.user.is_staff:
-            pk = self.kwargs['pk']
-            try:
-                return Reyting.objects.get(pk=pk)
-            except Reyting.DoesNotExist:
-                raise NotFound("Reyting topilmadi")
-
         queryset = self.get_queryset()
         try:
             return queryset.get(foydalanuvchi=self.request.user)
         except Reyting.DoesNotExist:
-             #Reyting yo'q bo'lsa yangi reyting yaratish
+            # Reyting yo'q bo'lsa yangi reyting yaratish
             reyting = Reyting.objects.create(foydalanuvchi=self.request.user)
             return reyting
 
@@ -307,6 +313,46 @@ class FoydalanuvchiYutugiListView(generics.ListAPIView):
 
 
 
+class TestListView(generics.ListAPIView):
+    serializer_class = TestListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Test.objects.filter(user=self.request.user)
+
+class TestDetailView(generics.RetrieveAPIView):
+    serializer_class = TestDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    queryset = Test.objects.all()
+
+class TestSubmitView(generics.GenericAPIView):
+    serializer_class = TestResultSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, test_id):
+        try:
+            test = Test.objects.get(pk=test_id)
+        except Test.DoesNotExist:
+            return Response({"error": "Test topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            user_answers = serializer.validated_data['user_answers']
+            # Natijalarni hisoblash logikasi
+            correct_answers = 0
+            for question_id, answer in user_answers.items():
+                try:
+                    question = Savol.objects.get(pk=question_id, test=test)
+                    if question.togri_javob == answer:
+                        correct_answers += 1
+                except Savol.DoesNotExist:
+                    return Response({"error": f"{question_id} idli savol topilmadi"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Natijalarni saqlash
+            request.user.tests.add(test, through_defaults={'score': correct_answers})
+
+            return Response({"message": "Test muvaffaqiyatli topshirildi", "correct_answers": correct_answers}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 
@@ -314,14 +360,82 @@ class FoydalanuvchiYutugiListView(generics.ListAPIView):
 
 
 
+class MockTestListView(generics.ListAPIView):
+    serializer_class = MockTestListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Test.objects.filter(user=self.request.user, is_mock=True)
+
+class MockTestDetailView(generics.RetrieveAPIView):
+    queryset = Test.objects.all()
+    serializer_class = MockTestDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
 
 
 
+class KursListView(generics.ListAPIView):
+    queryset = Kurs.objects.all()
+    serializer_class = KursListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Kurs.objects.filter(oquvchi=self.request.user)
+
+class KursDetailView(generics.RetrieveAPIView):
+    queryset = Kurs.objects.all()
+    serializer_class = KursDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class KursCreateView(generics.CreateAPIView):
+    queryset = Kurs.objects.all()
+    serializer_class = KursCreateSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class KursUpdateView(generics.UpdateAPIView):
+    queryset = Kurs.objects.all()
+    serializer_class = KursUpdateSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+class KursDeleteView(generics.DestroyAPIView):
+    queryset = Kurs.objects.all()
+    serializer_class = KursDetailSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
 
 
+class JadvalListView(generics.ListAPIView):
+    serializer_class = JadvalListSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        return Jadval.objects.filter(oquvchi=self.request.user)
 
+class JadvalDetailView(generics.RetrieveAPIView):
+    queryset = Jadval.objects.all()
+    serializer_class = JadvalDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class JadvalCreateView(generics.CreateAPIView):
+    queryset = Jadval.objects.all()
+    serializer_class = JadvalCreateSerializer
+    permission_classes = [permissions.IsAuthenticated] # Agar o'quvchi yaratishga huquqi bo'lsa permissions.IsAdminUser olib tashlash kk
+
+    def perform_create(self, serializer):
+        serializer.save(oquvchi=self.request.user)
+
+class JadvalUpdateView(generics.UpdateAPIView):
+    queryset = Jadval.objects.all()
+    serializer_class = JadvalUpdateSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser] #admin bo'lmasa olib tashlash kk
+
+class JadvalDeleteView(generics.DestroyAPIView):
+    queryset = Jadval.objects.all()
+    serializer_class = JadvalDetailSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser] #admin bo'lmasa olib tashlash kk
 
 
 

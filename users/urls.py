@@ -5,6 +5,9 @@ urlpatterns = [
     path('signup/', SignupView.as_view(), name='signup'),
     path('login/', LoginView.as_view(), name='login'),
     path('dashboard/', DashboardView.as_view(), name='dashboard'),
+    path('profile/', ProfileView.as_view(), name='profile'),
+
+    path('admin/last-registered-users/', LastRegisteredUsersView.as_view(), name='admin-last-registered-users'),
 
     path('users/', UserListView.as_view(), name='user-list'),
     path('users/<int:pk>/', UserDetailView.as_view(), name='user-detail'),
@@ -58,4 +61,25 @@ urlpatterns = [
     path('admin/achievements/<int:pk>/update/', YutuqUpdateView.as_view(), name='admin-achievement-update'),
     path('admin/achievements/<int:pk>/delete/', YutuqDeleteView.as_view(), name='admin-achievement-delete'),
     path('achievements/', FoydalanuvchiYutugiListView.as_view(), name='user-achievement-list'),
+
+
+#     foydalanuvchi sahifasidagi test apilar
+    path('tests/', TestListView.as_view(), name='test-list'),
+    path('tests/<int:pk>/', TestDetailView.as_view(), name='test-detail'),
+    path('tests/<int:test_id>/submit/', TestSubmitView.as_view(), name='test-submit'),
+
+    path('mock-tests/', MockTestListView.as_view(), name='mock-test-list'),
+    path('mock-tests/<int:pk>/', MockTestDetailView.as_view(), name='mock-test-detail'),
+
+    path('kurslar/', KursListView.as_view(), name='kurs-list'),
+    path('kurslar/<int:pk>/', KursDetailView.as_view(), name='kurs-detail'),
+    path('admin/kurslar/create/', KursCreateView.as_view(), name='kurs-create'),
+    path('admin/kurslar/<int:pk>/update/', KursUpdateView.as_view(), name='kurs-update'),
+    path('admin/kurslar/<int:pk>/delete/', KursDeleteView.as_view(), name='kurs-delete'),
+
+    path('jadval/', JadvalListView.as_view(), name='jadval-list'),
+    path('jadval/<int:pk>/', JadvalDetailView.as_view(), name='jadval-detail'),
+    path('admin/jadval/create/', JadvalCreateView.as_view(), name='jadval-create'),
+    path('admin/jadval/<int:pk>/update/', JadvalUpdateView.as_view(), name='jadval-update'),
+    path('admin/jadval/<int:pk>/delete/', JadvalDeleteView.as_view(), name='jadval-delete'),
 ]

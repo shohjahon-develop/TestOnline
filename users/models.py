@@ -24,7 +24,7 @@ class UserManager(BaseUserManager):
 class User(AbstractBaseUser, PermissionsMixin):
     ROLE_CHOICES = [
         ('student', 'Student'),
-        ('admin', 'Admin'),
+        ('superadmin', 'SuperAdmin'),
     ]
 
     email = models.EmailField(unique=True)
@@ -60,6 +60,7 @@ class Test(models.Model):
     qoshilgan_sana = models.DateField(auto_now_add=True)
     status = models.CharField(max_length=50, default='Faol')
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='tests', on_delete=models.CASCADE)
+    is_mock = models.BooleanField(default=False) # yangi qator
 
     def __str__(self):
         return self.title
@@ -139,14 +140,16 @@ class Tolov(models.Model):
         return f"{self.tavsif} - {self.summa} so'm"
 
 
-
 class Reyting(models.Model):
     foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='reytinglar', on_delete=models.CASCADE)
     umumiy_ball = models.IntegerField(default=0)
     testlar_ball = models.IntegerField(default=0)
     kurslar_ball = models.IntegerField(default=0)
-    # Qo'shimcha ball turlari (agar kerak bo'lsa)
+    # Qo'shimcha ball turlari
     platforma_vaqti_ball = models.IntegerField(default=0)
+    matematika_reyting = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    fizika_reyting = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    ingliz_tili_reyting = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
 
     def __str__(self):
         return f"{self.foydalanuvchi.full_name} - {self.umumiy_ball}"
@@ -155,6 +158,7 @@ class Reyting(models.Model):
         # Test natijalari va kurslardagi faollikni hisobga olgan holda umumiy ballni hisoblash
         self.umumiy_ball = self.testlar_ball + self.kurslar_ball + self.platforma_vaqti_ball
         self.save()
+
 
 
 class IELTSUmumiy(models.Model):
@@ -239,7 +243,29 @@ class FoydalanuvchiYutugi(models.Model):
 
 
 
+class Kurs(models.Model):
+    nomi = models.CharField(max_length=255)
+    tavsif = models.TextField()
+    narx = models.DecimalField(max_digits=10, decimal_places=2)
+    davomiyligi = models.CharField(max_length=50)  # Misol: "10 hafta"
+    oquvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='kurslar', on_delete=models.CASCADE)
 
+    def __str__(self):
+        return self.nomi
+
+
+
+
+class Jadval(models.Model):
+    kun = models.CharField(max_length=20)
+    fan = models.CharField(max_length=255)
+    boshlanish_vaqti = models.TimeField()
+    tugash_vaqti = models.TimeField()
+    tur = models.CharField(max_length=50)  # Dars, Amaliyot, Test va hokazo
+    oquvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='jadval', on_delete=models.CASCADE)
+
+    def __str__(self):
+        return f"{self.kun} - {self.fan} ({self.boshlanish_vaqti} - {self.tugash_vaqti})"
 
 
 
