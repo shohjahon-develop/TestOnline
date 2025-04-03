@@ -1,7 +1,9 @@
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
-from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_lazy as _  # Import qilish
+from django.utils import timezone
+
 
 class UserManager(BaseUserManager):
     def create_user(self, email, phone_number, full_name, password=None, role='student', **extra_fields):
@@ -14,7 +16,7 @@ class UserManager(BaseUserManager):
         return user
 
     def create_superuser(self, email, phone_number, full_name, password):
-        user = self.create_user(email, phone_number, full_name, password, role='admin')
+        user = self.create_user(email, phone_number, full_name, password, role='superadmin')
         user.is_staff = True
         user.is_superuser = True
         user.save(using=self._db)
@@ -34,18 +36,40 @@ class User(AbstractBaseUser, PermissionsMixin):
     grade = models.CharField(max_length=20, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(default=timezone.now)
 
     objects = UserManager()
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['phone_number', 'full_name']
 
+    groups = models.ManyToManyField(
+        "auth.Group",
+        verbose_name=_('groups'),
+        blank=True,
+        help_text=_(
+            'The groups this user belongs to. A user will get all permissions '
+            'granted to each of their groups.'
+        ),
+        related_name="users_user_groups",  # accounts o'rniga users
+        related_query_name="user",
+    )
+    user_permissions = models.ManyToManyField(
+        "auth.Permission",
+        verbose_name=_('user permissions'),
+        blank=True,
+        help_text=_(
+            'Specific permissions for this user.'
+        ),
+        related_name="users_user_permissions",  # accounts o'rniga users
+        related_query_name="user",
+    )
 
     def __str__(self):
         return f"{self.full_name} - {self.role}"
-
 
 
 class Test(models.Model):

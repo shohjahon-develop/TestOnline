@@ -69,6 +69,10 @@ class FoydalanuvchiYutugiAdmin(admin.ModelAdmin):
     raw_id_fields = ('foydalanuvchi', 'yutuq') # Qo'shildi
 
 
+admin.site.register(Jadval)
+admin.site.register(Kurs)
+
+
 
 
 
