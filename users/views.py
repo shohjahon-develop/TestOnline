@@ -1,3 +1,4 @@
+from django.db.models import Sum
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
@@ -46,12 +47,48 @@ class ProfileView(generics.RetrieveUpdateAPIView):
 
 
 
-class DashboardView(generics.RetrieveAPIView):
-    serializer_class = DashboardSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class AdminStatisticsView(generics.GenericAPIView):
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    serializer_class = AdminStatisticsSerializer
 
-    def get_object(self):
-        return self.request.user
+    def get(self, request, *args, **kwargs):
+        total_users = User.objects.count()
+        active_students = User.objects.filter(role='student', is_active=True).count()
+        total_tests = Test.objects.count()
+        total_revenue = Tolov.objects.filter(tur='kirim', status='muvaffaqiyatli').aggregate(Sum('summa'))['summa__sum'] or 0
+
+        data = {
+            'total_users': total_users,
+            'active_students': active_students,
+            'total_tests': total_tests,
+            'total_revenue': total_revenue,
+        }
+        serializer = self.get_serializer(data)
+        return Response(serializer.data)
+
+# So‘nggi ro‘yxatdan o‘tgan talabalar (allaqachon mavjud, biroz o‘zgartiramiz)
+class LastRegisteredUsersView(generics.ListAPIView):
+    serializer_class = LastRegisteredUserSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def get_queryset(self):
+        return User.objects.filter(role='student').order_by('-date_joined')[:30]
+
+# Oxirgi yuklangan testlar uchun view
+class LatestTestsView(generics.ListAPIView):
+    serializer_class = LatestTestSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def get_queryset(self):
+        return Test.objects.order_by('-qoshilgan_sana')[:10]
+
+# Oxirgi to‘lovlar uchun view
+class LatestPaymentsView(generics.ListAPIView):
+    serializer_class = LatestPaymentSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def get_queryset(self):
+        return Tolov.objects.order_by('-sana')[:20]
 
 
 class UserListView(generics.ListAPIView):

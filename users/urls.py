@@ -4,8 +4,13 @@ from .views import *
 urlpatterns = [
     path('signup/', SignupView.as_view(), name='signup'),
     path('login/', LoginView.as_view(), name='login'),
-    path('dashboard/', DashboardView.as_view(), name='dashboard'),
     path('profile/', ProfileView.as_view(), name='profile'),
+
+# Yangi API’lar
+    path('admin/statistics/', AdminStatisticsView.as_view(), name='admin-statistics'),
+    path('admin/last-registered-users/', LastRegisteredUsersView.as_view(), name='admin-last-registered-users'),
+    path('admin/latest-tests/', LatestTestsView.as_view(), name='admin-latest-tests'),
+    path('admin/latest-payments/', LatestPaymentsView.as_view(), name='admin-latest-payments'),
 
     path('admin/last-registered-users/', LastRegisteredUsersView.as_view(), name='admin-last-registered-users'),
 

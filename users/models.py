@@ -1,9 +1,9 @@
+# users/models.py
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
-from django.utils.translation import gettext_lazy as _  # Import qilish
+from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
-
 
 class UserManager(BaseUserManager):
     def create_user(self, email, phone_number, full_name, password=None, role='student', **extra_fields):
@@ -22,18 +22,26 @@ class UserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
-
 class User(AbstractBaseUser, PermissionsMixin):
     ROLE_CHOICES = [
         ('student', 'Student'),
         ('superadmin', 'SuperAdmin'),
     ]
 
+    GENDER_CHOICES = [
+        ('male', 'Erkak'),
+        ('female', 'Ayol'),
+    ]
+
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15, unique=True)
     full_name = models.CharField(max_length=255)
-    study_place = models.CharField(max_length=255, blank=True, null=True)
+    username = models.CharField(max_length=255, unique=True, blank=True, null=True)  # Yangi username maydoni
+    birth_date = models.DateField(blank=True, null=True)  # Yangi birth_date maydoni
+    gender = models.CharField(max_length=10, choices=GENDER_CHOICES, blank=True, null=True)  # Yangi gender maydoni
     grade = models.CharField(max_length=20, blank=True, null=True)
+    region = models.CharField(max_length=100, blank=True, null=True)  # Yangi region maydoni
+    study_place = models.CharField(max_length=255, blank=True, null=True)  # study_place o'rniga school sifatida ishlatamiz
     address = models.TextField(blank=True, null=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
 
@@ -54,7 +62,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             'The groups this user belongs to. A user will get all permissions '
             'granted to each of their groups.'
         ),
-        related_name="users_user_groups",  # accounts o'rniga users
+        related_name="users_user_groups",
         related_query_name="user",
     )
     user_permissions = models.ManyToManyField(
@@ -64,14 +72,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text=_(
             'Specific permissions for this user.'
         ),
-        related_name="users_user_permissions",  # accounts o'rniga users
+        related_name="users_user_permissions",
         related_query_name="user",
     )
 
     def __str__(self):
         return f"{self.full_name} - {self.role}"
 
-
+# Qolgan modellar o'zgarishsiz qoladi
 class Test(models.Model):
     title = models.CharField(max_length=255)
     fan = models.CharField(max_length=255)
@@ -80,11 +88,11 @@ class Test(models.Model):
     narx = models.IntegerField(default=0)
     mukofot = models.IntegerField(default=0)
     tavsif = models.TextField(blank=True, null=True)
-    vaqt_chegarasi = models.IntegerField(default=60)  # Qo'shildi
+    vaqt_chegarasi = models.IntegerField(default=60)
     qoshilgan_sana = models.DateField(auto_now_add=True)
     status = models.CharField(max_length=50, default='Faol')
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='tests', on_delete=models.CASCADE)
-    is_mock = models.BooleanField(default=False) # yangi qator
+    is_mock = models.BooleanField(default=False)
 
     def __str__(self):
         return self.title
@@ -107,9 +115,7 @@ class Savol(models.Model):
     togri_javob = models.CharField(max_length=1, choices=[('A', 'A'), ('B', 'B'), ('C', 'C'), ('D', 'D')])
 
     def __str__(self):
-        return self.savol_matni[:50] # Qisqacha savolni chiqarish
-
-
+        return self.savol_matni[:50]
 
 class OquvMaterial(models.Model):
     MATERIAL_TURLARI = [
@@ -132,14 +138,13 @@ class OquvMaterial(models.Model):
     material_nomi = models.CharField(max_length=255)
     tur = models.CharField(max_length=50, choices=MATERIAL_TURLARI, default='kitob')
     format = models.CharField(max_length=50, choices=FORMAT_TURLARI, default='pdf')
-    hajm = models.CharField(max_length=50)  # Misol: "5 MB", "100 KB"
+    hajm = models.CharField(max_length=50)
     yuklab_olish_imkoniyati = models.BooleanField(default=True)
     status = models.CharField(max_length=50, default='Faol')
     yuklangan_sana = models.DateField(auto_now_add=True)
 
     def __str__(self):
         return self.material_nomi
-
 
 class Tolov(models.Model):
     TUR_CHOYSLARI = [
@@ -163,13 +168,11 @@ class Tolov(models.Model):
     def __str__(self):
         return f"{self.tavsif} - {self.summa} so'm"
 
-
 class Reyting(models.Model):
     foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='reytinglar', on_delete=models.CASCADE)
     umumiy_ball = models.IntegerField(default=0)
     testlar_ball = models.IntegerField(default=0)
     kurslar_ball = models.IntegerField(default=0)
-    # Qo'shimcha ball turlari
     platforma_vaqti_ball = models.IntegerField(default=0)
     matematika_reyting = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     fizika_reyting = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
@@ -179,11 +182,8 @@ class Reyting(models.Model):
         return f"{self.foydalanuvchi.full_name} - {self.umumiy_ball}"
 
     def hisoblash_umumiy_ball(self):
-        # Test natijalari va kurslardagi faollikni hisobga olgan holda umumiy ballni hisoblash
         self.umumiy_ball = self.testlar_ball + self.kurslar_ball + self.platforma_vaqti_ball
         self.save()
-
-
 
 class IELTSUmumiy(models.Model):
     foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='ielts_umumiy', on_delete=models.CASCADE)
@@ -194,7 +194,7 @@ class IELTSUmumiy(models.Model):
     writing = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
     speaking = models.DecimalField(max_digits=3, decimal_places=1, default=0.0)
     keyingi_imtihon_sanasi = models.DateField(blank=True, null=True)
-    umumiy_progress = models.IntegerField(default=0)  # Foizda
+    umumiy_progress = models.IntegerField(default=0)
 
     def __str__(self):
         return f"{self.foydalanuvchi.full_name} - IELTS Umumiy"
@@ -217,26 +217,21 @@ class IELTSTest(models.Model):
 class IELTSMaterial(models.Model):
     ielts_umumiy = models.ForeignKey(IELTSUmumiy, related_name='ielts_materiallar', on_delete=models.CASCADE)
     nomi = models.CharField(max_length=255)
-    fayl = models.FileField(upload_to='ielts_materiallar/')  # Fayllar uchun joy
+    fayl = models.FileField(upload_to='ielts_materiallar/')
     yuklangan_sana = models.DateField(auto_now_add=True)
 
     def __str__(self):
         return self.nomi
 
-
-
-
 class Universitet(models.Model):
     nomi = models.CharField(max_length=255)
     hudud = models.CharField(max_length=255)
     website = models.URLField(blank=True, null=True)
-    yonalishlar = models.TextField(blank=True, null=True) # Agar ko'p bo'lsa ManyToManyField qilish mumkin
+    yonalishlar = models.TextField(blank=True, null=True)
     kirish_ballari = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return self.nomi
-
-
 
 class Yutuq(models.Model):
     TUR_CHOYSLARI = [
@@ -249,13 +244,12 @@ class Yutuq(models.Model):
     nomi = models.CharField(max_length=255)
     tavsif = models.TextField()
     tur = models.CharField(max_length=20, choices=TUR_CHOYSLARI, default='umumiy')
-    ball = models.IntegerField(default=0)  # Yutuq uchun beriladigan ball
-    shart = models.TextField()  # Yutuqni olish sharti
-    rasm = models.ImageField(upload_to='yutuqlar/', blank=True, null=True)  # Rasm (ixtiyoriy)
+    ball = models.IntegerField(default=0)
+    shart = models.TextField()
+    rasm = models.ImageField(upload_to='yutuqlar/', blank=True, null=True)
 
     def __str__(self):
         return self.nomi
-
 
 class FoydalanuvchiYutugi(models.Model):
     foydalanuvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='foydalanuvchi_yutuqlari', on_delete=models.CASCADE)
@@ -265,61 +259,23 @@ class FoydalanuvchiYutugi(models.Model):
     def __str__(self):
         return f"{self.foydalanuvchi.full_name} - {self.yutuq.nomi}"
 
-
-
 class Kurs(models.Model):
     nomi = models.CharField(max_length=255)
     tavsif = models.TextField()
     narx = models.DecimalField(max_digits=10, decimal_places=2)
-    davomiyligi = models.CharField(max_length=50)  # Misol: "10 hafta"
+    davomiyligi = models.CharField(max_length=50)
     oquvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='kurslar', on_delete=models.CASCADE)
 
     def __str__(self):
         return self.nomi
-
-
-
 
 class Jadval(models.Model):
     kun = models.CharField(max_length=20)
     fan = models.CharField(max_length=255)
     boshlanish_vaqti = models.TimeField()
     tugash_vaqti = models.TimeField()
-    tur = models.CharField(max_length=50)  # Dars, Amaliyot, Test va hokazo
+    tur = models.CharField(max_length=50)
     oquvchi = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='jadval', on_delete=models.CASCADE)
 
     def __str__(self):
         return f"{self.kun} - {self.fan} ({self.boshlanish_vaqti} - {self.tugash_vaqti})"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
