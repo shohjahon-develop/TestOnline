@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import *
 
+# admin.py
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     list_display = ('full_name', 'email', 'phone_number', 'role', 'is_active')

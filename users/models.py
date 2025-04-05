@@ -5,6 +5,9 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 
+
+
+
 class UserManager(BaseUserManager):
     def create_user(self, email, phone_number, full_name, password=None, role='student', **extra_fields):
         if not email:
@@ -36,13 +39,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15, unique=True)
     full_name = models.CharField(max_length=255)
-    username = models.CharField(max_length=255, unique=True, blank=True, null=True)  # Yangi username maydoni
-    birth_date = models.DateField(blank=True, null=True)  # Yangi birth_date maydoni
-    gender = models.CharField(max_length=10, choices=GENDER_CHOICES, blank=True, null=True)  # Yangi gender maydoni
+    birth_date = models.DateField(blank=True, null=True)
+    gender = models.CharField(max_length=10, choices=GENDER_CHOICES, blank=True, null=True)
     grade = models.CharField(max_length=20, blank=True, null=True)
-    region = models.CharField(max_length=100, blank=True, null=True)  # Yangi region maydoni
-    study_place = models.CharField(max_length=255, blank=True, null=True)  # study_place o'rniga school sifatida ishlatamiz
+    region = models.CharField(max_length=100, blank=True, null=True)
+    study_place = models.CharField(max_length=255, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
+    agreetoterms = models.BooleanField(default=False)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='student')
 
     is_active = models.BooleanField(default=True)

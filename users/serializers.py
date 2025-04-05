@@ -9,42 +9,44 @@ User = get_user_model()
 
 class SignupSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, validators=[password_validation.validate_password])
-    confirm_password = serializers.CharField(write_only=True, required=True)  # confirm_password maydoni
+    agreetoterms = serializers.BooleanField(required=True, error_messages={
+        'required': 'Shartlarga rozilik berish majburiy.',
+        'invalid': 'Shartlarga rozilik true bo‘lishi kerak.'
+    })
+    fullName = serializers.CharField(source='full_name', required=True)
+    phone = serializers.CharField(source='phone_number', required=True)
+    birthDate = serializers.DateField(source='birth_date', required=False)
+    school = serializers.CharField(source='study_place', required=False)
 
     class Meta:
         model = User
         fields = (
-            'email', 'password', 'confirm_password', 'phone_number', 'full_name', 'username',
-            'birth_date', 'gender', 'grade', 'region', 'study_place', 'address', 'role'
+            'email', 'password', 'fullName', 'phone', 'birthDate', 'gender',
+            'grade', 'region', 'school', 'role', 'agreetoterms'
         )
         extra_kwargs = {
-            'full_name': {'required': True},
-            'phone_number': {'required': True},
             'email': {'required': True},
         }
 
     def validate(self, data):
-        # Parol va tasdiqlash parolini tekshirish
-        if data.get('password') != data.get('confirm_password'):
-            raise serializers.ValidationError({"confirm_password": "Parollar mos kelmadi."})
+        if not data.get('agreetoterms'):
+            raise serializers.ValidationError({"agreetoterms": "Ro‘yxatdan o‘tish uchun shartlarga rozilik berishingiz kerak."})
         return data
 
     def create(self, validated_data):
-        # confirm_password ni o'chirib tashlaymiz, chunki u modelda yo'q
-        validated_data.pop('confirm_password', None)
         user = User.objects.create_user(
             email=validated_data['email'],
             phone_number=validated_data['phone_number'],
             full_name=validated_data['full_name'],
             password=validated_data['password'],
-            username=validated_data.get('username', None),
             birth_date=validated_data.get('birth_date', None),
             gender=validated_data.get('gender', None),
             grade=validated_data.get('grade', ''),
             region=validated_data.get('region', None),
-            study_place=validated_data.get('study_place', None),  # school sifatida ishlatamiz
+            study_place=validated_data.get('study_place', None),
             address=validated_data.get('address', ''),
-            role=validated_data['role']
+            role=validated_data.get('role', 'student'),
+            agreetoterms=validated_data['agreetoterms']  # Modelga qo'shildi
         )
         return user
 

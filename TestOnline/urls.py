@@ -9,9 +9,9 @@ from django.urls import path,include
 
 schema_view = get_schema_view(
     openapi.Info(
-        title="Bugalter API",
+        title="TestOnline API",
         default_version="v1",
-        description="Bugalteriya tizimi uchun API hujjatlari",
+        description="Online test tizimi uchun API hujjatlari",
         terms_of_service="https://yourwebsite.com/terms/",
         contact=openapi.Contact(email="support@yourwebsite.com"),
         license=openapi.License(name="MIT License"),
