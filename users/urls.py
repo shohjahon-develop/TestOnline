@@ -1,90 +1,98 @@
-from django.urls import path
-from .views import *
+from django.urls import path, include
+from rest_framework_nested import routers as nested_routers
+from rest_framework.routers import DefaultRouter
+
+from .views import (
+    # Auth
+    SignupView, LoginView,
+    # Profile (ViewSet)
+    ProfileViewSet,
+    # Student/Public Lists & ViewSets
+    SubjectListView, TestViewSet, MaterialViewSet, LeaderboardView,
+    MockTestViewSet, UniversityViewSet, CourseViewSet, ScheduleItemViewSet,
+    NotificationViewSet,
+    # Admin Dashboard
+    AdminDashboardStatsView, AdminDashboardLatestListsView,
+    # Admin Statistics (Separate Views)
+    AdminUserStatisticsView, AdminTestStatisticsView, AdminPaymentStatisticsView,
+    # Admin CRUD ViewSets
+    AdminUserViewSet, AdminTestViewSet, AdminQuestionViewSet, AdminMaterialViewSet,
+    AdminPaymentViewSet, AdminUniversityViewSet, AdminAchievementViewSet,
+    AdminCourseViewSet, AdminLessonViewSet
+)
+
+# --- Student/Public Router ---
+# (Bu qism o'zgarishsiz qoladi)
+router = DefaultRouter()
+router.register(r'tests', TestViewSet, basename='test')
+router.register(r'materials', MaterialViewSet, basename='material')
+router.register(r'mock-tests', MockTestViewSet, basename='mock-test')
+router.register(r'universities', UniversityViewSet, basename='university')
+router.register(r'courses', CourseViewSet, basename='course')
+router.register(r'schedule', ScheduleItemViewSet, basename='schedule-item') # Student o'z jadvalini boshqaradi
+router.register(r'notifications', NotificationViewSet, basename='notification') # Student o'z bildirishnomalarini ko'radi
+
+# Profile uchun alohida router
+# (Bu qism o'zgarishsiz qoladi)
+profile_router = DefaultRouter()
+profile_router.register(r'profile', ProfileViewSet, basename='profile')
+
+
+# --- Admin Router ---
+# (Bu qism o'zgarishsiz qoladi, FAQAT statistics olib tashlanadi)
+admin_router = DefaultRouter()
+admin_router.register(r'users', AdminUserViewSet, basename='admin-user')
+admin_router.register(r'tests', AdminTestViewSet, basename='admin-test')
+# Savollar nested router orqali qo'shiladi, asosiy routerda kerak emas
+# admin_router.register(r'questions', AdminQuestionViewSet, basename='admin-question')
+admin_router.register(r'materials', AdminMaterialViewSet, basename='admin-material')
+admin_router.register(r'payments', AdminPaymentViewSet, basename='admin-payment') # ReadOnly
+admin_router.register(r'universities', AdminUniversityViewSet, basename='admin-university')
+admin_router.register(r'achievements', AdminAchievementViewSet, basename='admin-achievement')
+admin_router.register(r'courses', AdminCourseViewSet, basename='admin-course')
+# Darslar nested router orqali qo'shiladi
+# admin_router.register(r'lessons', AdminLessonViewSet, basename='admin-lesson')
+# Subject uchun alohida ViewSet kerak bo'lsa:
+# admin_router.register(r'subjects', AdminSubjectViewSet, basename='admin-subject')
+
+
+# --- Nested Routers for Admin ---
+# (Bu qism o'zgarishsiz qoladi)
+tests_admin_router = nested_routers.NestedDefaultRouter(admin_router, r'tests', lookup='test')
+tests_admin_router.register(r'questions', AdminQuestionViewSet, basename='admin-test-question') # basename o'zgardi
+
+courses_admin_router = nested_routers.NestedDefaultRouter(admin_router, r'courses', lookup='course')
+courses_admin_router.register(r'lessons', AdminLessonViewSet, basename='admin-course-lesson') # basename o'zgardi
+
 
 urlpatterns = [
-    path('signup/', SignupView.as_view(), name='signup'),
-    path('login/', LoginView.as_view(), name='login'),
-    path('profile/', ProfileView.as_view(), name='profile'),
+    # Authentication
+    path('auth/signup/', SignupView.as_view(), name='signup'),
+    path('auth/login/', LoginView.as_view(), name='login'),
 
-# Yangi API’lar
-    path('admin/statistics/', AdminStatisticsView.as_view(), name='admin-statistics'),
-    path('admin/last-registered-users/', LastRegisteredUsersView.as_view(), name='admin-last-registered-users'),
-    path('admin/latest-tests/', LatestTestsView.as_view(), name='admin-latest-tests'),
-    path('admin/latest-payments/', LatestPaymentsView.as_view(), name='admin-latest-payments'),
+    # Student/Public Lists (non-ViewSet)
+    path('subjects/', SubjectListView.as_view(), name='subject-list'),
+    path('leaderboard/', LeaderboardView.as_view(), name='leaderboard'),
 
-    path('admin/last-registered-users/', LastRegisteredUsersView.as_view(), name='admin-last-registered-users'),
+    # Student Profile Actions & Retrieve/Update (using its own router)
+    path('', include(profile_router.urls)), # /api/profile/, /api/profile/change-password/, etc.
 
-    path('users/', UserListView.as_view(), name='user-list'),
-    path('users/<int:pk>/', UserDetailView.as_view(), name='user-detail'),
-    path('users/create/', UserCreateView.as_view(), name='user-create'),
-    path('users/<int:pk>/update/', UserUpdateView.as_view(), name='user-update'),
-    path('users/<int:pk>/delete/', UserDeleteView.as_view(), name='user-delete'),
+    # Other Student/Public ViewSets (using the main router)
+    path('', include(router.urls)), # /api/tests/, /api/materials/, etc.
 
+    # --- Admin Endpoints ---
+    # Dashboard
+    path('admin/dashboard/stats/', AdminDashboardStatsView.as_view(), name='admin-dashboard-stats'),
+    path('admin/dashboard/latest/', AdminDashboardLatestListsView.as_view(), name='admin-dashboard-latest'),
 
-    path('tests/create/', TestCreateView.as_view(), name='test-create'),
-    path('tests/<int:pk>/update/', TestUpdateView.as_view(), name='test-update'),
+    # Statistics (using separate GenericAPIViews)
+    path('admin/statistics/users/', AdminUserStatisticsView.as_view(), name='admin-stats-users'),
+    path('admin/statistics/tests/', AdminTestStatisticsView.as_view(), name='admin-stats-tests'),
+    path('admin/statistics/payments/', AdminPaymentStatisticsView.as_view(), name='admin-stats-payments'),
+    # path('admin/statistics/courses/', AdminCourseStatisticsView.as_view(), name='admin-stats-courses'), # Agar kerak bo'lsa
 
-
-    path('admin/tests/<int:test_id>/questions/', SavolListView.as_view(), name='admin-savol-list'),
-    path('admin/tests/<int:test_id>/questions/create/', SavolCreateView.as_view(), name='admin-savol-create'),
-    path('admin/questions/<int:pk>/update/', SavolUpdateView.as_view(), name='admin-savol-update'),
-    path('admin/questions/<int:pk>/delete/', SavolDeleteView.as_view(), name='admin-savol-delete'),
-
-    path('admin/materials/', OquvMaterialListView.as_view(), name='admin-material-list'),
-    path('admin/materials/<int:pk>/', OquvMaterialDetailView.as_view(), name='admin-material-detail'),
-    path('admin/materials/create/', OquvMaterialCreateView.as_view(), name='admin-material-create'),
-    path('admin/materials/<int:pk>/update/', OquvMaterialUpdateView.as_view(), name='admin-material-update'),
-    path('admin/materials/<int:pk>/delete/', OquvMaterialDeleteView.as_view(), name='admin-material-delete'),
-
-    path('admin/payments/', TolovListView.as_view(), name='admin-tolov-list'),
-    path('admin/payments/create/', TolovCreateView.as_view(), name='admin-tolov-create'),
-
-    path('admin/ratings/', ReytingListView.as_view(), name='admin-reyting-list'),  # Admin uchun barcha reytinglar
-    path('reyting/<int:pk>/', ReytingDetailView.as_view(), name='reyting-detail'),  # Foydalanuvchi uchun o'z reytingi
-    path('admin/ratings/<int:pk>/update/', ReytingUpdateView.as_view(), name='admin-reyting-update'),# Admin taxrirlashi uchun
-
-
-    path('admin/ielts/umumiy/', IELTSUmumiyListView.as_view(), name='admin-ielts-umumiy-list'),
-    path('admin/ielts/umumiy/<int:pk>/', IELTSUmumiyDetailView.as_view(), name='admin-ielts-umumiy-detail'),
-    path('admin/ielts/umumiy/<int:pk>/update/', IELTSUmumiyUpdateView.as_view(), name='admin-ielts-umumiy-update'),
-
-    path('admin/ielts/test/create/', IELTSTestCreateView.as_view(), name='admin-ielts-test-create'),
-    path('admin/ielts/test/<int:pk>/delete/', IELTSTestDeleteView.as_view(), name='admin-ielts-test-delete'),
-
-    path('admin/ielts/material/create/', IELTSMaterialCreateView.as_view(), name='admin-ielts-material-create'),
-    path('admin/ielts/material/<int:pk>/delete/', IELTSMaterialDeleteView.as_view(),name='admin-ielts-material-delete'),
-
-    path('universities/', UniversitetListView.as_view(), name='universitet-list'),  # Hammaga ochiq
-    path('universities/<int:pk>/', UniversitetDetailView.as_view(), name='universitet-detail'),  # Hammaga ochiq
-    path('admin/universities/create/', UniversitetCreateView.as_view(), name='admin-universitet-create'),
-    path('admin/universities/<int:pk>/update/', UniversitetUpdateView.as_view(), name='admin-universitet-update'),
-    path('admin/universities/<int:pk>/delete/', UniversitetDeleteView.as_view(), name='admin-universitet-delete'),
-
-    path('admin/achievements/', YutuqListView.as_view(), name='admin-achievement-list'),
-    path('admin/achievements/<int:pk>/', YutuqDetailView.as_view(), name='admin-achievement-detail'),
-    path('admin/achievements/create/', YutuqCreateView.as_view(), name='admin-achievement-create'),
-    path('admin/achievements/<int:pk>/update/', YutuqUpdateView.as_view(), name='admin-achievement-update'),
-    path('admin/achievements/<int:pk>/delete/', YutuqDeleteView.as_view(), name='admin-achievement-delete'),
-    path('achievements/', FoydalanuvchiYutugiListView.as_view(), name='user-achievement-list'),
-
-
-#     foydalanuvchi sahifasidagi test apilar
-    path('tests/', TestListView.as_view(), name='test-list'),
-    path('tests/<int:pk>/', TestDetailView.as_view(), name='test-detail'),
-    path('tests/<int:test_id>/submit/', TestSubmitView.as_view(), name='test-submit'),
-
-    path('mock-tests/', MockTestListView.as_view(), name='mock-test-list'),
-    path('mock-tests/<int:pk>/', MockTestDetailView.as_view(), name='mock-test-detail'),
-
-    path('kurslar/', KursListView.as_view(), name='kurs-list'),
-    path('kurslar/<int:pk>/', KursDetailView.as_view(), name='kurs-detail'),
-    path('admin/kurslar/create/', KursCreateView.as_view(), name='kurs-create'),
-    path('admin/kurslar/<int:pk>/update/', KursUpdateView.as_view(), name='kurs-update'),
-    path('admin/kurslar/<int:pk>/delete/', KursDeleteView.as_view(), name='kurs-delete'),
-
-    path('jadval/', JadvalListView.as_view(), name='jadval-list'),
-    path('jadval/<int:pk>/', JadvalDetailView.as_view(), name='jadval-detail'),
-    path('admin/jadval/create/', JadvalCreateView.as_view(), name='jadval-create'),
-    path('admin/jadval/<int:pk>/update/', JadvalUpdateView.as_view(), name='jadval-update'),
-    path('admin/jadval/<int:pk>/delete/', JadvalDeleteView.as_view(), name='jadval-delete'),
+    # Admin CRUD ViewSets (using admin_router and nested routers)
+    path('admin/', include(admin_router.urls)), # /api/admin/users/, /api/admin/tests/, etc.
+    path('admin/', include(tests_admin_router.urls)), # /api/admin/tests/{test_pk}/questions/
+    path('admin/', include(courses_admin_router.urls)), # /api/admin/courses/{course_pk}/lessons/
 ]

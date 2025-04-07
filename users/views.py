@@ -1,518 +1,900 @@
-from django.db.models import Sum
-from rest_framework import generics, permissions, status
-from rest_framework.exceptions import NotFound
-from rest_framework.permissions import IsAuthenticated
+import decimal
+from django.utils import timezone
+from datetime import timedelta
+from django.db.models import Count, Avg, Sum, F, ExpressionWrapper, DurationField, Q, Max
+from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext_lazy as _ # <<<--- _ uchun import
+from rest_framework import generics, permissions, status, viewsets, mixins
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.contrib.auth import get_user_model, authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.decorators import api_view, permission_classes
-from .serializers import *
+from rest_framework.exceptions import ValidationError, NotFound, PermissionDenied
+# V----- IsAuthenticatedOrReadOnly ni import qilish
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser, IsAuthenticatedOrReadOnly
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters
 
-User = get_user_model()
+from .models import (
+    User, Subject, Test, Question, UserTestResult, UserAnswer, Material, Payment,
+    UserRating, MockTest, MockTestResult, MockTestMaterial, University,
+    Achievement, UserAchievement, Course, Lesson, UserCourseEnrollment,
+    CourseReview, ScheduleItem, Notification, UserSettings
+)
+from .serializers import * # Barcha serializerlarni import qilamiz
+from .permissions import IsOwnerOrAdmin, IsAdminOrReadOnly
+
+# --- Authentication Views ---
 
 class SignupView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = SignupSerializer
-    permission_classes = (permissions.AllowAny,)
-
+    permission_classes = (AllowAny,)
 
 class LoginView(generics.GenericAPIView):
     serializer_class = LoginSerializer
-    permission_classes = (permissions.AllowAny,)
+    permission_classes = (AllowAny,)
 
-    def post(self, request):
-        serializer = self.get_serializer(data=request.data)
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        return Response({
-            'refresh': serializer.validated_data['refresh'],
-            'access': serializer.validated_data['access'],
-            'role': serializer.validated_data['role']  # Foydalanuvchi rolini qo'shamiz
-        })
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
+# --- User Profile & Settings Views ---
 
-
-class LastRegisteredUsersView(generics.ListAPIView):
-    serializer_class = LastRegisteredUserSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-    def get_queryset(self):
-        return User.objects.order_by('-date_joined')[:50]
-
-class ProfileView(generics.RetrieveUpdateAPIView):
-    serializer_class = ProfileSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class ProfileViewSet(mixins.RetrieveModelMixin,
+                     mixins.UpdateModelMixin,
+                     viewsets.GenericViewSet):
+    """
+    Foydalanuvchi profilini ko'rish, tahrirlash va bog'liq amallar uchun ViewSet.
+    URL Conf: profile_router = DefaultRouter(); profile_router.register(r'profile', ProfileViewSet)
+    Endpoints: /api/profile/, /api/profile/change-password/, /api/profile/settings/, etc.
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = User.objects.all()
 
     def get_object(self):
         return self.request.user
 
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'retrieve': UserSerializer,
+            'update': ProfileUpdateSerializer,
+            'partial_update': ProfileUpdateSerializer,
+            'change_password': ChangePasswordSerializer,
+            'settings': ProfileSettingsUpdateSerializer, # Update uchun
+            'my_test_history': UserTestResultSerializer,
+            'my_payment_history': PaymentSerializer,
+            'my_achievements': UserAchievementSerializer,
+            'my_rating': UserRatingSerializer,
+            'my_schedule': ScheduleItemSerializer,
+            'add_funds': AddFundsSerializer,
+        }
+        # `settings` GET uchun alohida serializer
+        if self.action == 'settings' and self.request.method == 'GET':
+            return UserSettingsSerializer
+        return action_serializer_map.get(self.action, UserSerializer) # Default
+
+    # Retrieve (GET /api/profile/) - mixin orqali
+    # Update (PUT /api/profile/) - mixin orqali
+    # Partial Update (PATCH /api/profile/) - mixin orqali
+
+    @action(detail=False, methods=['post'], url_path='change-password')
+    def change_password(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"detail": _("Parol muvaffaqiyatli o'zgartirildi.")})
+
+    @action(detail=False, methods=['get', 'put', 'patch'], url_path='settings')
+    def settings(self, request, *args, **kwargs):
+        user_settings = get_object_or_404(UserSettings, user=self.get_object())
+        if request.method == 'GET':
+            serializer = UserSettingsSerializer(user_settings) # Albatta UserSettingsSerializer ishlatamiz
+            return Response(serializer.data)
+        else:
+            serializer = self.get_serializer(user_settings, data=request.data, partial=request.method == 'PATCH')
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            # Yangilanganini qaytarish uchun ham UserSettingsSerializer
+            return Response(UserSettingsSerializer(user_settings).data)
+
+    @action(detail=False, methods=['get'], url_path='test-history')
+    def my_test_history(self, request):
+        queryset = UserTestResult.objects.filter(user=request.user).select_related('test', 'test__subject').order_by('-start_time')
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='payment-history')
+    def my_payment_history(self, request):
+        queryset = Payment.objects.filter(user=request.user).order_by('-created_at')
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='achievements')
+    def my_achievements(self, request):
+        queryset = UserAchievement.objects.filter(user=request.user).select_related('achievement').order_by('-earned_at')
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='rating')
+    def my_rating(self, request):
+        rating, created = UserRating.objects.get_or_create(user=request.user)
+        serializer = self.get_serializer(rating)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='schedule')
+    def my_schedule(self, request):
+
+        # lekin qulaylik uchun qoldirish mumkin.
+        queryset = ScheduleItem.objects.filter(user=request.user).order_by('day_of_week', 'start_time')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='add-funds')
+    def add_funds(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data['amount']
+        payment_method = serializer.validated_data['payment_method']
+        user = request.user
+        # ... (To'lov tizimi integratsiyasi) ...
+        payment = Payment.objects.create(
+            user=user, amount=amount, payment_type='deposit', status='pending',
+            payment_method=payment_method,
+            description=f"Hisobni {amount:,.0f} so'mga to'ldirish".replace(',', ' ')
+        )
+        redirect_url = f"/payment-gateway/pay?id={payment.id}" # Misol
+        return Response({
+            "message": _("To'lovni amalga oshirish uchun yo'naltirilmoqda..."),
+            "payment_id": payment.id, "redirect_url": redirect_url,
+        }, status=status.HTTP_201_CREATED)
 
 
-class AdminStatisticsView(generics.GenericAPIView):
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-    serializer_class = AdminStatisticsSerializer
+# --- Student/Public Views (Non-Profile) ---
+
+class SubjectListView(generics.ListAPIView):
+    queryset = Subject.objects.all()
+    serializer_class = SubjectSerializer
+    permission_classes = [AllowAny]
+
+class TestViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly] # <- Import qilingan
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['subject', 'difficulty', 'test_type']
+    search_fields = ['title', 'subject__name', 'description']
+    queryset = Test.objects.filter(status='active').select_related('subject').prefetch_related('questions') # Savollarni ham oldindan olish
+
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'list': TestListSerializer,
+            'retrieve': TestDetailSerializer,
+            'submit_test': SubmitAnswerSerializer,
+            'results': UserTestResultSerializer,
+        }
+        return action_serializer_map.get(self.action, TestListSerializer)
+
+    @action(detail=True, methods=['post'], url_path='submit', permission_classes=[IsAuthenticated])
+    def submit_test(self, request, pk=None):
+        test = self.get_object()
+        user = request.user
+        # Bir foydalanuvchi bir testni qayta-qayta topshirmasligi uchun tekshiruv (agar kerak bo'lsa)
+        # if UserTestResult.objects.filter(user=user, test=test, status='completed').exists():
+        #     return Response({"detail": _("Siz bu testni allaqachon topshirgansiz.")}, status=status.HTTP_400_BAD_REQUEST)
+
+        # To'lov tekshiruvi...
+        if test.test_type == 'premium' and test.price > 0:
+             if not Payment.objects.filter(user=user, test=test, status='successful').exists():
+                 if user.balance < test.price:
+                     raise ValidationError(_("Testni topshirish uchun hisobingizda yetarli mablag' yo'q."))
+                 Payment.objects.create(
+                     user=user, amount=-test.price, payment_type='test_purchase',
+                     description=f"'{test.title}' testi uchun to'lov", status='successful',
+                     payment_method='internal', test=test
+                 )
+                 user.refresh_from_db() # Yangilangan balansni olish uchun
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user_answers = serializer.validated_data.get('answers', {})
+
+        # Natijani yaratish va hisoblash
+        result = UserTestResult.objects.create(
+            user=user, test=test, status='in_progress',
+            total_questions=test.questions.count() # Savollar sonini boshida saqlash
+        )
+        result.calculate_result(user_answers) # Javoblarni saqlab, hisoblaydi
+
+        result_serializer = UserTestResultSerializer(result, context=self.get_serializer_context())
+        return Response(result_serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated])
+    def results(self, request, pk=None):
+        test = self.get_object()
+        user = request.user
+        try:
+            # Oxirgi tugallangan natijani olish
+            latest_result = UserTestResult.objects.filter(user=user, test=test, status='completed').latest('end_time')
+            serializer = self.get_serializer(latest_result, context={'request': request})
+            return Response(serializer.data)
+        except UserTestResult.DoesNotExist:
+            raise NotFound(_("Siz bu testni hali topshirmagansiz."))
+
+class MaterialViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly] # <- Import qilingan
+    serializer_class = MaterialSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['subject', 'material_type', 'file_format', 'is_free']
+    search_fields = ['title', 'subject__name', 'description']
+    queryset = Material.objects.filter(status='active').select_related('subject')
+
+    @action(detail=True, methods=['get'], url_path='download', permission_classes=[IsAuthenticated])
+    def download_material(self, request, pk=None):
+        material = self.get_object()
+        user = request.user
+        # ... (To'lov tekshiruvi va download count logikasi avvalgidek) ...
+        if not material.is_free:
+            if not Payment.objects.filter(user=user, material=material, status='successful').exists():
+                 # Agar material uchun alohida sotib olish logikasi bo'lsa:
+                 # if user.balance < material.price:
+                 #    raise ValidationError(...)
+                 # Payment.objects.create(...)
+                 # user.refresh_from_db()
+                 raise PermissionDenied(_("Bu materialni yuklab olish uchun avval sotib olishingiz kerak."))
+
+        material.increment_download_count()
+        serializer = self.get_serializer(material, context={'request': request}) # Contextni uzatish muhim (URL uchun)
+        # Javob sifatida faqat serializer data qaytariladi, frontend URLni olib yuklaydi
+        return Response(serializer.data)
+
+class LeaderboardView(generics.ListAPIView):
+    serializer_class = UserRatingSerializer
+    permission_classes = [AllowAny] # Reyting hamma uchun ochiq
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['user__full_name', 'user__study_place', 'user__region']
+    filterset_fields = ['user__region']
+    # ordering_fields = ['rank', 'total_score', 'math_score', 'physics_score', 'english_score']
+    # ordering = ['rank'] # Default saralash
+
+    def get_queryset(self):
+        # Rankni har doim yangilab turish samarasiz, background task orqali qilish kerak
+        # UserRating.update_ranks() # <<<--- BU YERDA QILMASLIK KERAK!
+        queryset = UserRating.objects.filter(user__is_active=True, user__is_blocked=False).select_related('user').order_by('rank') # Oldindan hisoblangan rank bo'yicha
+        subject = self.request.query_params.get('subject')
+        # Region filteri filter_backends orqali avtomatik ishlaydi
+
+        # Fan bo'yicha saralash (agar rank o'rniga ball bo'yicha kerak bo'lsa)
+        subject_order_map = {
+            'matematika': '-math_score',
+            'fizika': '-physics_score',
+            'ingliz_tili': '-english_score',
+            # Boshqa fanlar...
+        }
+        order_field = subject_order_map.get(subject)
+        if order_field:
+             # Agar fan bo'yicha saralansa, rankni e'tiborsiz qoldiramiz
+             return UserRating.objects.filter(user__is_active=True, user__is_blocked=False).select_related('user').order_by(order_field, '-total_score')
+
+        return queryset
+
+class MockTestViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly] # <- Import qilingan
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['mock_type', 'language']
+    search_fields = ['title', 'description']
+
+    def get_queryset(self):
+        # Faqat aktiv va vaqti kelgan mock testlar
+        return MockTest.objects.filter(status='active', available_from__lte=timezone.now().date())
+
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'list': MockTestListSerializer,
+            'retrieve': MockTestDetailSerializer,
+            'start_exam': serializers.Serializer, # Ma'lumot kiritilmaydi
+            'results': MockTestResultSerializer,
+            'my_results': MockTestResultSerializer,
+            'related_materials': MockTestMaterialSerializer,
+        }
+        return action_serializer_map.get(self.action, MockTestListSerializer)
+
+    @action(detail=True, methods=['post'], url_path='start', permission_classes=[IsAuthenticated])
+    def start_exam(self, request, pk=None):
+         mock_test = self.get_object()
+         user = request.user
+         # ... (To'lov tekshiruvi va natija yaratish logikasi avvalgidek) ...
+         if mock_test.price > 0:
+            if not Payment.objects.filter(user=user, mock_test=mock_test, status='successful').exists():
+                if user.balance < mock_test.price:
+                    raise ValidationError(_("Mock testni boshlash uchun hisobingizda yetarli mablag' yo'q."))
+                Payment.objects.create(
+                     user=user, amount=-mock_test.price, payment_type='mock_test_purchase',
+                     description=f"'{mock_test.title}' uchun to'lov", status='successful',
+                     payment_method='internal', mock_test=mock_test
+                )
+                user.refresh_from_db()
+         result, created = MockTestResult.objects.get_or_create(
+            user=user, mock_test=mock_test, status='in_progress'
+            # Agar qayta topshirish mumkin bo'lsa, bu yerda boshqacha logika kerak
+         )
+         # Bu yerda imtihonni boshlash uchun kerakli ma'lumotlarni qaytarish mumkin
+         # Masalan, birinchi bo'lim ma'lumotlari yoki savollari
+         return Response({ "detail": _("Imtihon boshlandi."), "result_id": result.id }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='results', permission_classes=[IsAuthenticated])
+    def results(self, request, pk=None):
+        mock_test = self.get_object()
+        user = request.user
+        try:
+            latest_result = MockTestResult.objects.filter(user=user, mock_test=mock_test, status='completed').latest('end_time')
+            serializer = self.get_serializer(latest_result, context={'request': request})
+            return Response(serializer.data)
+        except MockTestResult.DoesNotExist:
+            raise NotFound(_("Siz bu mock testni hali topshirmagansiz."))
+
+    @action(detail=False, methods=['get'], url_path='my-results', permission_classes=[IsAuthenticated])
+    def my_results(self, request):
+        user = request.user
+        results = MockTestResult.objects.filter(user=user).select_related('mock_test').order_by('-start_time')
+        page = self.paginate_queryset(results)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(results, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='materials', permission_classes=[IsAuthenticated])
+    def related_materials(self, request):
+        # Filter by user preferences or common materials
+        queryset = MockTestMaterial.objects.all() # Filterlash logikasi qo'shilishi mumkin
+        serializer = self.get_serializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+
+class UniversityViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = University.objects.all().order_by('region', 'name')
+    serializer_class = UniversitySerializer
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['region']
+    search_fields = ['name', 'short_name']
+
+class CourseViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly] # <- Import qilingan
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['subject', 'difficulty', 'language', 'has_certificate', 'price']
+    search_fields = ['title', 'subject__name', 'teacher__full_name', 'description']
+    queryset = Course.objects.filter(status='active').select_related('subject', 'teacher').prefetch_related('lessons', 'reviews') # Oldindan olish
+
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'list': CourseListSerializer,
+            'retrieve': CourseDetailSerializer,
+            'my_courses': CourseEnrollmentSerializer,
+            'enroll': serializers.Serializer, # Data kerak emas
+            'leave_review': LeaveReviewSerializer,
+        }
+        return action_serializer_map.get(self.action, CourseListSerializer)
+
+    @action(detail=False, methods=['get'], url_path='my-courses', permission_classes=[IsAuthenticated])
+    def my_courses(self, request):
+        enrollments = UserCourseEnrollment.objects.filter(user=request.user).select_related('course', 'course__subject').order_by('-enrolled_at')
+        page = self.paginate_queryset(enrollments)
+        if page is not None:
+            # CourseEnrollmentSerializer ishlatish kerak
+            serializer = CourseEnrollmentSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        serializer = CourseEnrollmentSerializer(enrollments, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def enroll(self, request, pk=None):
+        course = self.get_object()
+        user = request.user
+        # ... (To'lov tekshiruvi va enrollment yaratish logikasi avvalgidek) ...
+        if UserCourseEnrollment.objects.filter(user=user, course=course).exists():
+            return Response({"detail": _("Siz bu kursga allaqachon yozilgansiz.")}, status=status.HTTP_400_BAD_REQUEST)
+        if course.price > 0:
+             if user.balance < course.price:
+                 raise ValidationError(_("Kursni sotib olish uchun hisobingizda yetarli mablag' yo'q."))
+             Payment.objects.create(
+                 user=user, amount=-course.price, payment_type='course_purchase',
+                 description=f"'{course.title}' kursini sotib olish", status='successful',
+                 payment_method='internal' # course=course
+             )
+             user.refresh_from_db()
+        enrollment = UserCourseEnrollment.objects.create(user=user, course=course)
+        course.enrolled_students_count = F('enrolled_students_count') + 1
+        course.save(update_fields=['enrolled_students_count'])
+        serializer = CourseEnrollmentSerializer(enrollment, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+    @action(detail=True, methods=['post'], url_path='leave-review', permission_classes=[IsAuthenticated])
+    def leave_review(self, request, pk=None):
+        course = self.get_object()
+        user = request.user
+        # ... (Sharh qoldirish logikasi avvalgidek) ...
+        if not UserCourseEnrollment.objects.filter(user=user, course=course).exists():
+             raise PermissionDenied(_("Sharh qoldirish uchun avval kursga yozilishingiz kerak."))
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        review, created = CourseReview.objects.update_or_create(
+            user=user, course=course, defaults=serializer.validated_data
+        )
+        # Kurs reytingi Review.save() da avtomatik yangilanadi
+        review_serializer = CourseReviewSerializer(review, context={'request': request})
+        return Response(review_serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class ScheduleItemViewSet(viewsets.ModelViewSet):
+    serializer_class = ScheduleItemSerializer
+    permission_classes = [IsAuthenticated, IsOwnerOrAdmin]
+    queryset = ScheduleItem.objects.all()
+
+    def get_queryset(self):
+        # Swagger schema generatsiyasi vaqtida xatolikni oldini olish
+        if getattr(self, 'swagger_fake_view', False):
+            return ScheduleItem.objects.none()  # Bo'sh queryset qaytarish
+        return ScheduleItem.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = Notification.objects.all()
+
+    def get_queryset(self):
+        # Swagger schema generatsiyasi vaqtida xatolikni oldini olish
+        if getattr(self, 'swagger_fake_view', False):
+            return Notification.objects.none()  # Bo'sh queryset qaytarish
+        return Notification.objects.filter(user=self.request.user).order_by('-created_at')
+
+    @action(detail=False, methods=['get'], url_path='unread-count')
+    def unread_count(self, request):
+        count = self.get_queryset().filter(is_read=False).count()
+        return Response({'unread_count': count})
+
+    @action(detail=True, methods=['post'], url_path='mark-read')
+    def mark_as_read(self, request, pk=None):
+        notification = self.get_object()
+        notification.is_read = True
+        notification.save(update_fields=['is_read'])
+        return Response(self.get_serializer(notification).data)
+
+    @action(detail=False, methods=['post'], url_path='mark-all-read')
+    def mark_all_as_read(self, request):
+        self.get_queryset().filter(is_read=False).update(is_read=True)
+        return Response({'detail': _("Barcha bildirishnomalar o'qildi deb belgilandi.")})
+
+
+# ==============================================
+#               ADMIN PANEL VIEWS
+# ==============================================
+# IsAdminUser permission class yuqorida import qilingan
+
+# --- Admin Dashboard Views ---
+class AdminDashboardStatsView(generics.GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminDashboardStatsSerializer
 
     def get(self, request, *args, **kwargs):
+        # ... (Statistika hisoblash logikasi, foizlarni hisoblash kerak) ...
         total_users = User.objects.count()
-        active_students = User.objects.filter(role='student', is_active=True).count()
-        total_tests = Test.objects.count()
-        total_revenue = Tolov.objects.filter(tur='kirim', status='muvaffaqiyatli').aggregate(Sum('summa'))['summa__sum'] or 0
-
+        active_students = User.objects.filter(role='student', is_active=True, is_blocked=False).count()
+        total_tests_taken = UserTestResult.objects.filter(status='completed').count()
+        total_revenue = Payment.objects.filter(status='successful', amount__gt=0).aggregate(total=Sum('amount'))['total'] or decimal.Decimal(0)
+        # Example change calculation (replace with actual logic based on a time period)
         data = {
-            'total_users': total_users,
-            'active_students': active_students,
-            'total_tests': total_tests,
-            'total_revenue': total_revenue,
+            'total_users': total_users, 'total_users_change': 12.0,
+            'active_students': active_students, 'active_students_change': 8.0,
+            'total_tests_taken': total_tests_taken, 'total_tests_taken_change': 15.0,
+            'total_revenue': total_revenue, 'total_revenue_change': 18.0,
+        }
+        # Serializerni ishlatish
+        serializer = self.get_serializer(data)
+        # serializer.is_valid(raise_exception=True) # Agar serializerda validation bo'lsa
+        return Response(serializer.data)
+
+class AdminDashboardLatestListsView(generics.GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminDashboardLatestListsSerializer  # Serializer qo'shildi
+
+    def get(self, request, *args, **kwargs):
+        latest_users = User.objects.order_by('-date_joined')[:5]
+        latest_tests = Test.objects.select_related('subject').order_by('-created_at')[:5]
+        latest_payments = Payment.objects.select_related('user').order_by('-created_at')[:5]
+        data = {
+            'latest_users': AdminLastRegisteredUserSerializer(latest_users, many=True).data,
+            'latest_tests': AdminLatestTestSerializer(latest_tests, many=True).data,
+            'latest_payments': AdminLatestPaymentSerializer(latest_payments, many=True, context={'request': request}).data,
         }
         serializer = self.get_serializer(data)
         return Response(serializer.data)
 
-# So‘nggi ro‘yxatdan o‘tgan talabalar (allaqachon mavjud, biroz o‘zgartiramiz)
-class LastRegisteredUsersView(generics.ListAPIView):
-    serializer_class = LastRegisteredUserSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+# --- Admin Statistics Views (Separate) ---
+# BU VIEWLAR UCHUN SERIALIZERLARNI TO'G'RI YARATISH VA DATA NI O'SHALARGA MOSLASH KERAK
+class AdminUserStatisticsView(generics.GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminUserStatisticsSerializer  # Serializer qo'shildi
 
-    def get_queryset(self):
-        return User.objects.filter(role='student').order_by('-date_joined')[:30]
+    def get(self, request, *args, **kwargs):
+        # Foydalanuvchi statistikasini hisoblash
+        users = User.objects.all()
+        new_users = users.filter(date_joined__gte=timezone.now() - timedelta(days=30)).count()
+        active_users = users.filter(is_active=True, is_blocked=False).count()
+        users_graph = (
+            users
+            .filter(date_joined__lte=timezone.now())
+            .extra(select={'date': 'date(date_joined)'}).values('date')
+            .annotate(value=Count('id')).order_by('date')[:30]
+        )
+        average_activity = "24 min"  # Bu yerda haqiqiy hisoblash kerak bo'ladi
 
-# Oxirgi yuklangan testlar uchun view
-class LatestTestsView(generics.ListAPIView):
-    serializer_class = LatestTestSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+        data = {
+            'users_graph': users_graph,
+            'new_users': {'value': new_users, 'change_percentage': 10.0, 'target': 1000},
+            'active_users': {'value': active_users, 'change_percentage': 5.0, 'target': 500},
+            'average_activity': average_activity,
+        }
+        serializer = self.get_serializer(data)
+        return Response(serializer.data)
 
-    def get_queryset(self):
-        return Test.objects.order_by('-qoshilgan_sana')[:10]
+class AdminTestStatisticsView(generics.GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminTestStatisticsSerializer  # Serializer qo'shildi
 
-# Oxirgi to‘lovlar uchun view
-class LatestPaymentsView(generics.ListAPIView):
-    serializer_class = LatestPaymentSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def get(self, request, *args, **kwargs):
+        # Test statistikasini hisoblash
+        tests = Test.objects.all()
+        total_tests = tests.count()
+        tests_taken = UserTestResult.objects.filter(status='completed').count()
+        avg_score = UserTestResult.objects.filter(status='completed').aggregate(avg=Avg('percentage'))['avg'] or 0
+        tests_graph = (
+            UserTestResult.objects
+            .filter(start_time__lte=timezone.now())
+            .extra(select={'date': 'date(start_time)'}).values('date')
+            .annotate(value=Count('id')).order_by('date')[:30]
+        )
 
-    def get_queryset(self):
-        return Tolov.objects.order_by('-sana')[:20]
+        data = {
+            'tests_graph': tests_graph,
+            'total_tests': {'value': total_tests, 'change_percentage': 8.0, 'target': 100},
+            'tests_taken': {'value': tests_taken, 'change_percentage': 12.0, 'target': 500},
+            'average_score': {'value': round(avg_score, 2), 'change_percentage': 3.0, 'target': 80},
+        }
+        serializer = self.get_serializer(data)
+        return Response(serializer.data)
 
+class AdminPaymentStatisticsView(generics.GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminPaymentStatisticsSerializer  # Serializer qo'shildi
 
-class UserListView(generics.ListAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserListSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def get(self, request, *args, **kwargs):
+        # To'lov statistikasini hisoblash
+        payments = Payment.objects.filter(status='successful')
+        total_income = payments.filter(amount__gt=0).aggregate(total=Sum('amount'))['total'] or 0
+        total_expenses = payments.filter(amount__lt=0).aggregate(total=Sum('amount'))['total'] or 0
+        avg_payment = payments.filter(amount__gt=0).aggregate(avg=Avg('amount'))['avg'] or 0
+        payments_graph = (
+            payments
+            .filter(created_at__lte=timezone.now())
+            .extra(select={'date': 'date(created_at)'}).values('date')
+            .annotate(value=Count('id')).order_by('date')[:30]
+        )
 
-class UserDetailView(generics.RetrieveAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserDetailSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+        data = {
+            'payments_graph': payments_graph,
+            'total_income': {'value': total_income, 'change_percentage': 15.0, 'target': 1000000},
+            'total_expenses': {'value': abs(total_expenses), 'change_percentage': 5.0, 'target': 500000},
+            'average_payment': {'value': round(avg_payment, 2), 'change_percentage': 2.0, 'target': 50000},
+        }
+        serializer = self.get_serializer(data)
+        return Response(serializer.data)
 
-class UserCreateView(generics.CreateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+# --- Admin CRUD ViewSets ---
+# (AdminUserViewSet, AdminTestViewSet, AdminQuestionViewSet, AdminMaterialViewSet, AdminPaymentViewSet,
+#  AdminUniversityViewSet, AdminAchievementViewSet, AdminCourseViewSet, AdminLessonViewSet
+#  avvalgi kodimdagi kabi qoladi, chunki ular urls.py ga mos edi)
 
-class UserUpdateView(generics.UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+class AdminUserViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.all().prefetch_related('settings', 'rating', 'groups')
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['role', 'is_active', 'is_blocked', 'gender', 'region']
+    search_fields = ['email', 'full_name', 'phone_number']
+    ordering_fields = ['date_joined', 'full_name', 'email', 'balance']
+    ordering = ['-date_joined']
 
-class UserDeleteView(generics.DestroyAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserDetailSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def get_serializer_class(self):
+        if self.action == 'list': return AdminUserListSerializer
+        elif self.action == 'test_history': return UserTestResultSerializer
+        elif self.action == 'payment_history': return PaymentSerializer
+        elif self.action == 'statistics': return serializers.Serializer # Maxsus statistika serializeri kerak bo'lishi mumkin
+        return UserSerializer # Create/Retrieve/Update uchun to'liq ma'lumot
 
+    @action(detail=True, methods=['post'], url_path='block')
+    def block_user(self, request, pk=None):
+        user = self.get_object()
+        user.is_blocked = True; user.is_active = False
+        user.save(update_fields=['is_blocked', 'is_active'])
+        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
 
+    @action(detail=True, methods=['post'], url_path='unblock')
+    def unblock_user(self, request, pk=None):
+        user = self.get_object()
+        user.is_blocked = False; user.is_active = True
+        user.save(update_fields=['is_blocked', 'is_active'])
+        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
 
+    @action(detail=True, methods=['post'], url_path='add-balance')
+    def add_balance(self, request, pk=None):
+        user = self.get_object()
+        # ... (Balans qo'shish logikasi avvalgidek) ...
+        amount_str = request.data.get('amount')
+        description = request.data.get('description', 'Admin tomonidan hisob to\'ldirildi')
+        try: amount_decimal = decimal.Decimal(amount_str)
+        except: raise ValidationError({"amount": _("Noto'g'ri summa formati.")})
+        if amount_decimal <= 0: raise ValidationError({"amount": _("Summa musbat bo'lishi kerak.")})
+        Payment.objects.create(
+            user=user, amount=amount_decimal, payment_type='bonus', status='successful',
+            payment_method='admin', description=description
+        ) # Balans Payment.save() da yangilanadi
+        user.refresh_from_db()
+        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
 
-class TestCreateView(generics.CreateAPIView):
-    queryset = Test.objects.all()
-    serializer_class = TestCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    @action(detail=True, methods=['get'], url_path='test-history')
+    def test_history(self, request, pk=None):
+        user = self.get_object()
+        results = UserTestResult.objects.filter(user=user).select_related('test', 'test__subject').order_by('-start_time')
+        page = self.paginate_queryset(results)
+        serializer_context = self.get_serializer_context() # Contextni olish
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(results, many=True, context=serializer_context)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='payment-history')
+    def payment_history(self, request, pk=None):
+        user = self.get_object()
+        payments = Payment.objects.filter(user=user).order_by('-created_at')
+        page = self.paginate_queryset(payments)
+        serializer_context = self.get_serializer_context() # Contextni olish
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(payments, many=True, context=serializer_context)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='statistics')
+    def statistics(self, request, pk=None):
+         user = self.get_object()
+         # ... (Statistika hisoblash avvalgidek) ...
+         completed_tests = UserTestResult.objects.filter(user=user, status='completed').count()
+         avg_score = UserTestResult.objects.filter(user=user, status='completed').aggregate(avg=Avg('percentage'))['avg'] or 0
+         total_payments = Payment.objects.filter(user=user, status='successful', amount__gt=0).aggregate(total=Sum('amount'))['total'] or 0
+         # Serializer ishlatish yaxshiroq
+         return Response({
+             "completed_tests": completed_tests,
+             "average_score": round(avg_score, 2),
+             "total_payments": total_payments,
+         })
+
+class AdminTestViewSet(viewsets.ModelViewSet):
+    queryset = Test.objects.select_related('subject', 'created_by').prefetch_related('questions')
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['subject', 'difficulty', 'test_type', 'status']
+    search_fields = ['title', 'subject__name']
+    ordering_fields = ['created_at', 'title', 'question_count', 'price']
+    ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'list': AdminTestListSerializer,
+            'create': AdminTestCreateUpdateSerializer,
+            'update': AdminTestCreateUpdateSerializer,
+            'partial_update': AdminTestCreateUpdateSerializer,
+            'retrieve': TestDetailSerializer, # Savollar bilan ko'rsatish
+            'participants': UserTestResultSerializer,
+            'statistics': serializers.Serializer, # Maxsus serializer kerak bo'lishi mumkin
+        }
+        return action_serializer_map.get(self.action, TestDetailSerializer) # Default retrieve uchun
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        serializer.save(created_by=self.request.user)
 
-class TestUpdateView(generics.UpdateAPIView):
-    queryset = Test.objects.all()
-    serializer_class = TestUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    @action(detail=True, methods=['get'], url_path='participants')
+    def participants(self, request, pk=None):
+        test = self.get_object()
+        results = UserTestResult.objects.filter(test=test).select_related('user').order_by('-start_time') # Hamma statusdagini olish mumkin
+        page = self.paginate_queryset(results)
+        serializer_context = self.get_serializer_context()
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(results, many=True, context=serializer_context)
+        return Response(serializer.data)
 
+    @action(detail=True, methods=['get'], url_path='statistics')
+    def statistics(self, request, pk=None):
+        test = self.get_object()
+        # ... (Statistika hisoblash avvalgidek) ...
+        participants_count = UserTestResult.objects.filter(test=test, status='completed').count()
+        avg_score = UserTestResult.objects.filter(test=test, status='completed').aggregate(avg=Avg('percentage'))['avg'] or 0
+        total_income = Payment.objects.filter(test=test, status='successful', payment_type='test_purchase').aggregate(total=Sum('amount'))['total'] or 0
+        # Serializer ishlatish yaxshiroq
+        return Response({
+            "participants_count": participants_count,
+            "average_score": round(avg_score, 2),
+            "total_income": abs(total_income) if total_income else 0,
+        })
 
-
-class SavolListView(generics.ListAPIView):
-    serializer_class = SavolSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+class AdminQuestionViewSet(viewsets.ModelViewSet):
+    queryset = Question.objects.select_related('test') # Testni ham olish
+    serializer_class = AdminQuestionSerializer
+    permission_classes = [IsAdminUser]
+    pagination_class = None # Odatda test savollari ko'p bo'lmaydi
 
     def get_queryset(self):
-        test_id = self.kwargs['test_id']
-        try:
-            test = Test.objects.get(pk=test_id)
-        except Test.DoesNotExist:
-            raise NotFound("Test topilmadi")
-        return Savol.objects.filter(test=test)
-
-class SavolCreateView(generics.CreateAPIView):
-    serializer_class = SavolCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+        test_pk = self.kwargs.get('test_pk')
+        if test_pk:
+            return Question.objects.filter(test_id=test_pk).order_by('order', 'id')
+        # Agar nested bo'lmasa (masalan, /api/admin/questions/), bo'sh queryset qaytarish mumkin
+        return Question.objects.none()
 
     def perform_create(self, serializer):
-        test_id = self.kwargs['test_id']
-        try:
-            test = Test.objects.get(pk=test_id)
-        except Test.DoesNotExist:
-            raise NotFound("Test topilmadi")
-        serializer.save(test=test)
+        test_pk = self.kwargs.get('test_pk')
+        if not test_pk: raise ValidationError(_("URL da test ID si ko'rsatilmagan."))
+        test = get_object_or_404(Test, pk=test_pk)
+        # Orderni avtomatik belgilash (oxirgisidan keyingi)
+        last_order = Question.objects.filter(test=test).aggregate(max_order=Max('order'))['max_order'] or 0
+        instance = serializer.save(test=test, order=last_order + 1)
+        test.question_count = F('question_count') + 1 # Atomik tarzda oshirish
+        test.save(update_fields=['question_count'])
 
-class SavolUpdateView(generics.UpdateAPIView):
-    queryset = Savol.objects.all()
-    serializer_class = SavolUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def perform_update(self, serializer):
+         # Testni o'zgartirmaslik kerak
+         serializer.save()
 
-class SavolDeleteView(generics.DestroyAPIView):
-    queryset = Savol.objects.all()
-    serializer_class = SavolSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def perform_destroy(self, instance):
+        test = instance.test
+        instance.delete()
+        # Atomik tarzda kamaytirish
+        test.question_count = F('question_count') - 1
+        test.save(update_fields=['question_count'])
+        # Qolgan savollarning orderini yangilash kerak bo'lishi mumkin
 
+class AdminMaterialViewSet(viewsets.ModelViewSet):
+    queryset = Material.objects.select_related('subject', 'uploaded_by')
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['subject', 'material_type', 'file_format', 'status', 'is_free']
+    search_fields = ['title', 'subject__name']
+    ordering_fields = ['uploaded_at', 'title', 'downloads_count']
+    ordering = ['-uploaded_at']
 
-
-
-class OquvMaterialListView(generics.ListAPIView):
-    queryset = OquvMaterial.objects.all()
-    serializer_class = OquvMaterialSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class OquvMaterialDetailView(generics.RetrieveAPIView):
-    queryset = OquvMaterial.objects.all()
-    serializer_class = OquvMaterialSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class OquvMaterialCreateView(generics.CreateAPIView):
-    queryset = OquvMaterial.objects.all()
-    serializer_class = OquvMaterialCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class OquvMaterialUpdateView(generics.UpdateAPIView):
-    queryset = OquvMaterial.objects.all()
-    serializer_class = OquvMaterialUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class OquvMaterialDeleteView(generics.DestroyAPIView):
-    queryset = OquvMaterial.objects.all()
-    serializer_class = OquvMaterialSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-
-class TolovListView(generics.ListAPIView):
-    serializer_class = TolovSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-    queryset = Tolov.objects.all()
-
-
-class TolovCreateView(generics.CreateAPIView):
-    serializer_class = TolovCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def get_serializer_class(self):
+        if self.action == 'list': return AdminMaterialListSerializer
+        return AdminMaterialCreateUpdateSerializer
 
     def perform_create(self, serializer):
-        # Yangi to'lovni yaratgan adminni avtomatik ravishda foydalanuvchi sifatida belgilash
-        serializer.save(foydalanuvchi=self.request.user)
+        serializer.save(uploaded_by=self.request.user)
+
+class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Payment.objects.select_related('user').order_by('-created_at')
+    serializer_class = PaymentSerializer # Admin ham shu serializerdan foydalansin
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['user', 'status', 'payment_type', 'payment_method']
+    search_fields = ['user__email', 'user__full_name', 'transaction_id']
+    ordering_fields = ['created_at', 'amount']
+
+class AdminUniversityViewSet(viewsets.ModelViewSet):
+    queryset = University.objects.all().order_by('region', 'name')
+    serializer_class = UniversitySerializer
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['region']
+    search_fields = ['name', 'short_name']
+
+class AdminAchievementViewSet(viewsets.ModelViewSet):
+    queryset = Achievement.objects.all().order_by('category', 'name')
+    serializer_class = AchievementSerializer
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['category', 'is_active']
+    search_fields = ['name', 'description']
+
+class AdminCourseViewSet(viewsets.ModelViewSet):
+    queryset = Course.objects.select_related('subject', 'teacher').prefetch_related('lessons', 'reviews')
+    permission_classes = [IsAdminUser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['subject', 'teacher', 'status', 'difficulty', 'language']
+    search_fields = ['title', 'subject__name', 'teacher__full_name']
+    ordering_fields = ['created_at', 'title', 'price', 'rating', 'enrolled_students_count']
+    ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        action_serializer_map = {
+            'list': CourseListSerializer, # Admin ham student ko'radigan listni ko'rsin
+            'retrieve': CourseDetailSerializer, # Darslar va sharhlar bilan
+            'create': CourseDetailSerializer, # Yaratish uchun ham shu (yoki maxsus)
+            'update': CourseDetailSerializer,
+            'partial_update': CourseDetailSerializer,
+            'enrollments': CourseEnrollmentSerializer,
+            'reviews': CourseReviewSerializer,
+        }
+        return action_serializer_map.get(self.action, CourseDetailSerializer)
+
+    # perform_create da teacher ni belgilash kerak bo'lishi mumkin
+    # def perform_create(self, serializer):
+    #     serializer.save(teacher=self.request.user) # Agar admin o'qituvchi bo'lsa
+
+    @action(detail=True, methods=['get'], url_path='enrollments')
+    def enrollments(self, request, pk=None):
+        course = self.get_object()
+        enrolls = UserCourseEnrollment.objects.filter(course=course).select_related('user')
+        page = self.paginate_queryset(enrolls)
+        serializer_context = self.get_serializer_context()
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(enrolls, many=True, context=serializer_context)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='reviews')
+    def reviews(self, request, pk=None):
+        course = self.get_object()
+        reviews_qs = CourseReview.objects.filter(course=course).select_related('user').order_by('-created_at')
+        page = self.paginate_queryset(reviews_qs)
+        serializer_context = self.get_serializer_context()
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(reviews_qs, many=True, context=serializer_context)
+        return Response(serializer.data)
 
 
-
-
-class ReytingListView(generics.ListAPIView):
-    serializer_class = ReytingSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Reyting.objects.all()
-
-class ReytingDetailView(generics.RetrieveAPIView):
-    serializer_class = ReytingSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_object(self):
-        queryset = self.get_queryset()
-        try:
-            return queryset.get(foydalanuvchi=self.request.user)
-        except Reyting.DoesNotExist:
-            # Reyting yo'q bo'lsa yangi reyting yaratish
-            reyting = Reyting.objects.create(foydalanuvchi=self.request.user)
-            return reyting
-
-    def get_queryset(self):
-        return Reyting.objects.all()
-
-class ReytingUpdateView(generics.UpdateAPIView):
-    queryset = Reyting.objects.all()
-    serializer_class = ReytingUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-
-
-class IELTSUmumiyListView(generics.ListAPIView):
-    queryset = IELTSUmumiy.objects.all()
-    serializer_class = IELTSUmumiySerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSUmumiyDetailView(generics.RetrieveAPIView):
-    queryset = IELTSUmumiy.objects.all()
-    serializer_class = IELTSUmumiySerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSUmumiyUpdateView(generics.UpdateAPIView):
-    queryset = IELTSUmumiy.objects.all()
-    serializer_class = IELTSUmumiyUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSTestCreateView(generics.CreateAPIView):
-    queryset = IELTSTest.objects.all()
-    serializer_class = IELTSTestSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSTestDeleteView(generics.DestroyAPIView):
-    queryset = IELTSTest.objects.all()
-    serializer_class = IELTSTestSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSMaterialCreateView(generics.CreateAPIView):
-    queryset = IELTSMaterial.objects.all()
-    serializer_class = IELTSMaterialSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class IELTSMaterialDeleteView(generics.DestroyAPIView):
-    queryset = IELTSMaterial.objects.all()
-    serializer_class = IELTSMaterialSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-
-class UniversitetListView(generics.ListAPIView):
-    queryset = Universitet.objects.all()
-    serializer_class = UniversitetSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class UniversitetDetailView(generics.RetrieveAPIView):
-    queryset = Universitet.objects.all()
-    serializer_class = UniversitetSerializer
-    permission_classes = [permissions.IsAuthenticated] # Authenticated qilsa ham bo'ladi
-
-class UniversitetCreateView(generics.CreateAPIView):
-    queryset = Universitet.objects.all()
-    serializer_class = UniversitetCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class UniversitetUpdateView(generics.UpdateAPIView):
-    queryset = Universitet.objects.all()
-    serializer_class = UniversitetUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class UniversitetDeleteView(generics.DestroyAPIView):
-    queryset = Universitet.objects.all()
-    serializer_class = UniversitetSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-
-class YutuqListView(generics.ListAPIView):
-    queryset = Yutuq.objects.all()
-    serializer_class = YutuqSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class YutuqDetailView(generics.RetrieveAPIView):
-    queryset = Yutuq.objects.all()
-    serializer_class = YutuqSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class YutuqCreateView(generics.CreateAPIView):
-    queryset = Yutuq.objects.all()
-    serializer_class = YutuqCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class YutuqUpdateView(generics.UpdateAPIView):
-    queryset = Yutuq.objects.all()
-    serializer_class = YutuqUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-class YutuqDeleteView(generics.DestroyAPIView):
-    queryset = Yutuq.objects.all()
-    serializer_class = YutuqSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-class FoydalanuvchiYutugiListView(generics.ListAPIView):
-    serializer_class = FoydalanuvchiYutugiSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class AdminLessonViewSet(viewsets.ModelViewSet):
+    queryset = Lesson.objects.select_related('course')
+    serializer_class = LessonSerializer # Admin ham shu serializerdan foydalansin
+    permission_classes = [IsAdminUser]
+    pagination_class = None # Kurs darslari odatda ko'p emas
 
     def get_queryset(self):
-        """Foydalanuvchi yutuqlarini olish (faqat o'ziniki)"""
-        user = self.request.user
-        return FoydalanuvchiYutugi.objects.filter(foydalanuvchi=user)
-
-
-
-
-
-
-class TestListView(generics.ListAPIView):
-    serializer_class = TestListSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Test.objects.filter(user=self.request.user)
-
-class TestDetailView(generics.RetrieveAPIView):
-    serializer_class = TestDetailSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    queryset = Test.objects.all()
-
-class TestSubmitView(generics.GenericAPIView):
-    serializer_class = TestResultSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, test_id):
-        try:
-            test = Test.objects.get(pk=test_id)
-        except Test.DoesNotExist:
-            return Response({"error": "Test topilmadi"}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            user_answers = serializer.validated_data['user_answers']
-            # Natijalarni hisoblash logikasi
-            correct_answers = 0
-            for question_id, answer in user_answers.items():
-                try:
-                    question = Savol.objects.get(pk=question_id, test=test)
-                    if question.togri_javob == answer:
-                        correct_answers += 1
-                except Savol.DoesNotExist:
-                    return Response({"error": f"{question_id} idli savol topilmadi"}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Natijalarni saqlash
-            request.user.tests.add(test, through_defaults={'score': correct_answers})
-
-            return Response({"message": "Test muvaffaqiyatli topshirildi", "correct_answers": correct_answers}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-
-
-
-
-
-class MockTestListView(generics.ListAPIView):
-    serializer_class = MockTestListSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Test.objects.filter(user=self.request.user, is_mock=True)
-
-class MockTestDetailView(generics.RetrieveAPIView):
-    queryset = Test.objects.all()
-    serializer_class = MockTestDetailSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-
-
-
-class KursListView(generics.ListAPIView):
-    queryset = Kurs.objects.all()
-    serializer_class = KursListSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Kurs.objects.filter(oquvchi=self.request.user)
-
-class KursDetailView(generics.RetrieveAPIView):
-    queryset = Kurs.objects.all()
-    serializer_class = KursDetailSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-class KursCreateView(generics.CreateAPIView):
-    queryset = Kurs.objects.all()
-    serializer_class = KursCreateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+        course_pk = self.kwargs.get('course_pk')
+        if course_pk:
+            return Lesson.objects.filter(course_id=course_pk).order_by('order', 'id')
+        return Lesson.objects.none() # Nested bo'lmasa ko'rsatma
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        course_pk = self.kwargs.get('course_pk')
+        if not course_pk: raise ValidationError(_("URL da kurs ID si ko'rsatilmagan."))
+        course = get_object_or_404(Course, pk=course_pk)
+        # Orderni avtomatik belgilash
+        last_order = Lesson.objects.filter(course=course).aggregate(max_order=Max('order'))['max_order'] or 0
+        instance = serializer.save(course=course, order=last_order + 1)
+        course.update_lessons_count()
 
-class KursUpdateView(generics.UpdateAPIView):
-    queryset = Kurs.objects.all()
-    serializer_class = KursUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    def perform_update(self, serializer):
+        # Kursni o'zgartirish mumkin emas
+        instance = serializer.save()
+        # Agar order o'zgarsa, boshqa darslarning orderini yangilash kerak bo'lishi mumkin
 
-class KursDeleteView(generics.DestroyAPIView):
-    queryset = Kurs.objects.all()
-    serializer_class = KursDetailSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-
-
-class JadvalListView(generics.ListAPIView):
-    serializer_class = JadvalListSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Jadval.objects.filter(oquvchi=self.request.user)
-
-class JadvalDetailView(generics.RetrieveAPIView):
-    queryset = Jadval.objects.all()
-    serializer_class = JadvalDetailSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-class JadvalCreateView(generics.CreateAPIView):
-    queryset = Jadval.objects.all()
-    serializer_class = JadvalCreateSerializer
-    permission_classes = [permissions.IsAuthenticated] # Agar o'quvchi yaratishga huquqi bo'lsa permissions.IsAdminUser olib tashlash kk
-
-    def perform_create(self, serializer):
-        serializer.save(oquvchi=self.request.user)
-
-class JadvalUpdateView(generics.UpdateAPIView):
-    queryset = Jadval.objects.all()
-    serializer_class = JadvalUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser] #admin bo'lmasa olib tashlash kk
-
-class JadvalDeleteView(generics.DestroyAPIView):
-    queryset = Jadval.objects.all()
-    serializer_class = JadvalDetailSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser] #admin bo'lmasa olib tashlash kk
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def perform_destroy(self, instance):
+        course = instance.course
+        instance.delete()
+        course.update_lessons_count()
