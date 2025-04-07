@@ -1,7 +1,8 @@
+from django.db import router
 from django.urls import path, include
 from rest_framework_nested import routers as nested_routers
 from rest_framework.routers import DefaultRouter
-
+from rest_framework import routers
 from .views import (
     # Auth
     SignupView, LoginView,
@@ -40,7 +41,7 @@ profile_router.register(r'profile', ProfileViewSet, basename='profile')
 
 # --- Admin Router ---
 # (Bu qism o'zgarishsiz qoladi, FAQAT statistics olib tashlanadi)
-admin_router = DefaultRouter()
+admin_router = routers.DefaultRouter()
 admin_router.register(r'users', AdminUserViewSet, basename='admin-user')
 admin_router.register(r'tests', AdminTestViewSet, basename='admin-test')
 # Savollar nested router orqali qo'shiladi, asosiy routerda kerak emas
@@ -58,10 +59,10 @@ admin_router.register(r'courses', AdminCourseViewSet, basename='admin-course')
 
 # --- Nested Routers for Admin ---
 # (Bu qism o'zgarishsiz qoladi)
-tests_admin_router = nested_routers.NestedDefaultRouter(admin_router, r'tests', lookup='test')
+tests_admin_router = nested_routers.NestedSimpleRouter(admin_router, r'tests', lookup='test')
 tests_admin_router.register(r'questions', AdminQuestionViewSet, basename='admin-test-question') # basename o'zgardi
 
-courses_admin_router = nested_routers.NestedDefaultRouter(admin_router, r'courses', lookup='course')
+courses_admin_router = nested_routers.NestedSimpleRouter(admin_router, r'courses', lookup='course')
 courses_admin_router.register(r'lessons', AdminLessonViewSet, basename='admin-course-lesson') # basename o'zgardi
 
 
