@@ -667,12 +667,15 @@ class AdminDashboardStatsSerializer(serializers.Serializer):
 
 class AdminLastRegisteredUserSerializer(serializers.ModelSerializer):
     status_display = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = ('id', 'full_name', 'phone_number', 'date_joined', 'status_display')
 
     def get_status_display(self, obj):
-        if obj.is_blocked: return _("Bloklangan")
+        # `obj` bu yerda `User` ob'ekti bo'ladi
+        if obj.is_blocked:
+            return _("Bloklangan")
         return _("Faol") if obj.is_active else _("Nofaol")
 
 class AdminLatestTestSerializer(serializers.ModelSerializer):
@@ -907,10 +910,9 @@ class AdminLessonSerializer(LessonSerializer):
 
 
 class AdminDashboardLatestListsSerializer(serializers.Serializer):
-    latest_users = AdminLastRegisteredUserSerializer(many=True, read_only=True)
-    latest_tests = AdminLatestTestSerializer(many=True, read_only=True)
-    latest_payments = AdminLatestPaymentSerializer(many=True, read_only=True)
-    # Agar boshqa ro'yxatlar qo'shilsa, shu yerga qo'shing
+    latest_users = serializers.ListField(child=serializers.DictField(), read_only=True)
+    latest_tests = serializers.ListField(child=serializers.DictField(), read_only=True)
+    latest_payments = serializers.ListField(child=serializers.DictField(), read_only=True)
 
 
 

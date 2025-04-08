@@ -31,6 +31,7 @@ class SignupView(generics.CreateAPIView):
     serializer_class = SignupSerializer
     permission_classes = (AllowAny,)
 
+
 class LoginView(generics.GenericAPIView):
     serializer_class = LoginSerializer
     permission_classes = (AllowAny,)
@@ -38,10 +39,19 @@ class LoginView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
+
+        # `validated_data` dan tokenlarni olish
+        token = serializer.validated_data['token']
+        refresh_token = serializer.validated_data['refresh_token']
+
+        # `user` maydonini olish uchun serializer.data dan foydalanamiz
+        # `serializer.data` ni chaqirish `get_user` metodini ishga tushiradi
+        user_data = serializer.data['user']
+
         response_data = {
-            'token': serializer.validated_data['token'],
-            'refresh_token': serializer.validated_data['refresh_token'],
-            'user': serializer.validated_data['user']
+            'token': token,
+            'refresh_token': refresh_token,
+            'user': user_data
         }
         return Response(response_data, status=status.HTTP_200_OK)
 
