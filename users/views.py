@@ -1,3 +1,5 @@
+
+
 import decimal
 from django.utils import timezone
 from datetime import timedelta
@@ -36,7 +38,12 @@ class LoginView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+        response_data = {
+            'token': serializer.validated_data['token'],
+            'refresh_token': serializer.validated_data['refresh_token'],
+            'user': serializer.validated_data['user']
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
 # --- User Profile & Settings Views ---
 
@@ -898,3 +905,7 @@ class AdminLessonViewSet(viewsets.ModelViewSet):
         course = instance.course
         instance.delete()
         course.update_lessons_count()
+
+
+
+

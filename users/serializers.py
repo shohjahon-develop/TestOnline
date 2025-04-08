@@ -1,3 +1,6 @@
+
+
+
 # users/serializers.py
 import decimal
 from rest_framework import serializers
@@ -22,107 +25,133 @@ User = get_user_model()
 # --- Authentication Serializers ---
 
 class SignupSerializer(serializers.ModelSerializer):
+    # Frontend nomlari bilan fieldlarni e'lon qilamiz va `source` orqali bog'laymiz
+    email = serializers.EmailField(required=True)
+    fullName = serializers.CharField(source='full_name', required=True, label=_("Full Name"))
+    phone = serializers.CharField(source='phone_number', required=True, label=_("Phone Number"))
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    password2 = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'}, label=_("Confirm Password"))
-    agreetoterms = serializers.BooleanField(required=True, write_only=True, label=_("Agree to Terms"))
+    # password2 olib tashlandi
+    agreeToTerms = serializers.BooleanField(source='agreetoterms', required=True, write_only=True, label=_("Agree to Terms"))
+
+    # Ixtiyoriy maydonlar (frontend nomlari bilan)
+    birthDate = serializers.DateField(source='birth_date', required=False, allow_null=True, label=_("Birth Date"))
+    gender = serializers.ChoiceField(choices=User.GENDER_CHOICES, required=False, allow_null=True)
+    grade = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    region = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    school = serializers.CharField(source='study_place', required=False, allow_null=True, allow_blank=True, label=_("School/Study Place"))
 
     class Meta:
         model = User
+        # Frontend yuboradigan field nomlarini ko'rsatamiz
         fields = (
-            'email', 'full_name', 'phone_number', 'password', 'password2',
-            'birth_date', 'gender', 'grade', 'region', 'study_place', 'agreetoterms'
+            'email', 'fullName', 'phone', 'password', 'agreeToTerms', # password2 yo'q
+            'birthDate', 'gender', 'grade', 'region', 'school'
         )
+        # `extra_kwargs` da ham frontend nomlarini ishlatsa bo'ladi, lekin source borligi uchun shart emas
+        # Faqat password write_only bo'lishi muhim
         extra_kwargs = {
-            'email': {'required': True},
-            'full_name': {'required': True},
-            'phone_number': {'required': True},
-            'birth_date': {'required': False, 'allow_null': True},
-            'gender': {'required': False, 'allow_null': True},
-            'grade': {'required': False, 'allow_blank': True},
-            'region': {'required': False, 'allow_blank': True},
-            'study_place': {'required': False, 'allow_blank': True},
+            'password': {'write_only': True},
         }
 
-    def validate_email(self, value):
+    # --- Validationlar ---
+    def validate_email(self, value): # Bu nom to'g'ri
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(_("Bu email manzili allaqachon ro'yxatdan o'tgan."))
         return value
 
-    def validate_phone_number(self, value):
+    def validate_phone(self, value): # Frontend nomi 'phone'
+        # phone maydoniga kelgan qiymatni validate qilamiz
         if not value:
              raise serializers.ValidationError(_("Telefon raqam kiritilishi shart."))
-        # Basic validation - adjust as needed for international numbers if required
         if not value.startswith('+998') or len(value) != 13 or not value[1:].isdigit():
              raise serializers.ValidationError(_("Telefon raqam +998XXXXXXXXX formatida bo'lishi kerak."))
+        # Model maydoni (`phone_number`) bo'yicha tekshiramiz
         if User.objects.filter(phone_number=value).exists():
             raise serializers.ValidationError(_("Bu telefon raqam allaqachon ro'yxatdan o'tgan."))
         return value
 
     def validate(self, data):
+        # agreeToTerms (frontend nomi) bilan tekshiramiz
         if not data.get('agreetoterms'):
-            raise serializers.ValidationError({"agreetoterms": _("Ro'yxatdan o'tish uchun shartlarga rozilik bildiring.")})
-        if data['password'] != data['password2']:
-            raise serializers.ValidationError({"password": _("Parollar mos kelmadi.")}) # Error on password field for consistency
+            raise serializers.ValidationError({"agreeToTerms": _("Ro'yxatdan o'tish uchun shartlarga rozilik bildiring.")})
+        # password2 tekshiruvi olib tashlandi
+        # Kuchli parol tekshiruvi
         try:
+            # 'password' kaliti bilan (frontend nomi)
             password_validation.validate_password(data['password'])
-        except Exception as e: # Catch specific validation errors if possible
+        except Exception as e:
             raise serializers.ValidationError({"password": list(e.messages)})
+
+        # Role avtomatik belgilanadi create() yoki create_user() ichida
         return data
 
     def create(self, validated_data):
-        validated_data.pop('password2')
-        agreetoterms = validated_data.pop('agreetoterms') # Get value but don't pass to create_user
-        # Ensure role is 'student' for signup
+        # password2 ni pop qilish kerak emas
+        # agreeToTerms ni pop qilish shart emas, source borligi uchun create_user ga to'g'ri nom bilan ketadi
+        # Faqat create_user ga role='student' ekanligini berish kerak
         validated_data['role'] = 'student'
+        # `source` tufayli validated_data ichida model field nomlari bo'ladi
+        # Masalan: {'email': '...', 'full_name': '...', 'phone_number': '...', 'password': '...'}
         user = User.objects.create_user(**validated_data)
-        user.agreetoterms = agreetoterms
-        user.save()
-        # Related objects (Rating, Settings) are created via UserManager signal or post_save signal
+        # UserManager.create_user avtomatik rating va settings yaratishi kerak (avvalgi kod bo'yicha)
         return user
 
 class LoginSerializer(serializers.Serializer):
-    login = serializers.CharField(label=_("Email or Phone Number"))
-    password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    email = serializers.EmailField(required=True, label=_("Email"))
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+        label=_("Password")
+    )
     token = serializers.CharField(read_only=True)
     refresh_token = serializers.CharField(read_only=True)
-    user = serializers.SerializerMethodField(read_only=True) # Renamed from 'user_data'
+    user = serializers.SerializerMethodField(read_only=True)
 
     def validate(self, data):
-        login = data.get('login')
+        email = data.get('email')
         password = data.get('password')
-
-        if not login or not password:
-            raise serializers.ValidationError(_("Login (email/telefon) va parol kiritilishi shart."), code='authorization')
-
-        user = None
         request = self.context.get('request')
-        if '@' in login:
-            user = authenticate(request=request, email=login, password=password)
-        else:
-            try:
-                user_obj = User.objects.filter(phone_number=login).first()
-                if user_obj:
-                    user = authenticate(request=request, email=user_obj.email, password=password)
-            except User.DoesNotExist:
-                pass
+
+        # Authenticate using email and password
+        user = authenticate(request=request, email=email, password=password)
 
         if user is None:
-            raise serializers.ValidationError(_("Login yoki parol noto'g'ri."), code='authorization')
+            raise serializers.ValidationError(
+                _("Email yoki parol noto'g'ri."),
+                code='authorization'
+            )
         if not user.is_active:
-            raise serializers.ValidationError(_("Foydalanuvchi akkaunti faol emas."), code='authorization')
+            raise serializers.ValidationError(
+                _("Foydalanuvchi akkaunti faol emas."),
+                code='authorization'
+            )
         if user.is_blocked:
-             raise serializers.ValidationError(_("Foydalanuvchi akkaunti bloklangan."), code='authorization')
+            raise serializers.ValidationError(
+                _("Foydalanuvchi akkaunti bloklangan."),
+                code='authorization'
+            )
 
+        # Generate tokens
         refresh = RefreshToken.for_user(user)
         data['refresh_token'] = str(refresh)
         data['token'] = str(refresh.access_token)
-        data['user_data'] = UserSerializer(user, context=self.context).data # Store user data temporarily
+        data['user_instance'] = user  # Store user instance for get_user method
 
         return data
 
     def get_user(self, obj):
-        # Retrieve stored user data from validated_data
-        return obj.get('user_data')
+        user_instance = obj.get('user_instance')
+        if user_instance:
+            # Return user info including role
+            return {
+                'id': user_instance.id,  # Fixed magnaid to id
+                'full_name': user_instance.full_name,
+                'email': user_instance.email,
+                'role': user_instance.role,  # Direct role value
+                'role_display': user_instance.get_role_display(),  # Human-readable role
+            }
+        return None
 
 
 # --- User Profile & Settings Serializers ---
@@ -823,11 +852,11 @@ class GraphDataPointSerializer(serializers.Serializer):
     date = serializers.DateField() # Or DateTimeField
     value = serializers.IntegerField()
 
-class AdminDashboardStatsSerializer(serializers.Serializer):
-    total_users = DetailedStatSerializer()
-    active_students = DetailedStatSerializer()
-    total_tests = DetailedStatSerializer() # Or tests taken
-    total_revenue = DetailedStatSerializer()
+# class AdminDashboardStatsSerializer(serializers.Serializer):
+#     total_users = DetailedStatSerializer()
+#     active_students = DetailedStatSerializer()
+#     total_tests = DetailedStatSerializer() # Or tests taken
+#     total_revenue = DetailedStatSerializer()
 
 class AdminUserStatisticsSerializer(serializers.Serializer):
      users_graph = GraphDataPointSerializer(many=True)
