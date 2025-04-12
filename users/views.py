@@ -3,6 +3,7 @@
 import decimal
 from django.utils import timezone
 from datetime import timedelta
+from drf_yasg.utils import swagger_auto_schema
 from django.db.models import Count, Avg, Sum, F, ExpressionWrapper, DurationField, Q, Max
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext_lazy as _ # <<<--- _ uchun import
@@ -65,7 +66,7 @@ class ProfileViewSet(mixins.RetrieveModelMixin,
     URL Conf: profile_router = DefaultRouter(); profile_router.register(r'profile', ProfileViewSet)
     Endpoints: /api/profile/, /api/profile/change-password/, /api/profile/settings/, etc.
     """
-    permission_classes = [IsAuthenticated]
+    # permission_classes = [IsAuthenticated]
     queryset = User.objects.all()
 
     def get_object(self):
@@ -77,7 +78,7 @@ class ProfileViewSet(mixins.RetrieveModelMixin,
             'update': ProfileUpdateSerializer,
             'partial_update': ProfileUpdateSerializer,
             'change_password': ChangePasswordSerializer,
-            'settings': ProfileSettingsUpdateSerializer, # Update uchun
+            'manage_settings': ProfileSettingsUpdateSerializer,  # <<< O'ZGARTIRILDI (PUT/PATCH uchun)
             'my_test_history': UserTestResultSerializer,
             'my_payment_history': PaymentSerializer,
             'my_achievements': UserAchievementSerializer,
@@ -85,10 +86,10 @@ class ProfileViewSet(mixins.RetrieveModelMixin,
             'my_schedule': ScheduleItemSerializer,
             'add_funds': AddFundsSerializer,
         }
-        # `settings` GET uchun alohida serializer
-        if self.action == 'settings' and self.request.method == 'GET':
+        # `manage_settings` GET uchun alohida serializer
+        if self.action == 'manage_settings' and self.request.method == 'GET':  # <<< O'ZGARTIRILDI
             return UserSettingsSerializer
-        return action_serializer_map.get(self.action, UserSerializer) # Default
+        return action_serializer_map.get(self.action, UserSerializer)
 
     # Retrieve (GET /api/profile/) - mixin orqali
     # Update (PUT /api/profile/) - mixin orqali
@@ -101,17 +102,20 @@ class ProfileViewSet(mixins.RetrieveModelMixin,
         serializer.save()
         return Response({"detail": _("Parol muvaffaqiyatli o'zgartirildi.")})
 
-    @action(detail=False, methods=['get', 'put', 'patch'], url_path='settings')
-    def settings(self, request, *args, **kwargs):
+    @action(detail=False, methods=['get', 'put', 'patch'], url_path='settings')  # URL path o'zgarishsiz qolishi mumkin
+    def manage_settings(self, request, *args, **kwargs):  # <<< NOM O'ZGARTIRILDI
         user_settings = get_object_or_404(UserSettings, user=self.get_object())
         if request.method == 'GET':
-            serializer = UserSettingsSerializer(user_settings) # Albatta UserSettingsSerializer ishlatamiz
+            # GET uchun UserSettingsSerializer ishlatiladi
+            serializer = UserSettingsSerializer(user_settings)
             return Response(serializer.data)
         else:
-            serializer = self.get_serializer(user_settings, data=request.data, partial=request.method == 'PATCH')
+            # PUT/PATCH uchun ProfileSettingsUpdateSerializer ishlatiladi
+            serializer = ProfileSettingsUpdateSerializer(user_settings, data=request.data,
+                                                         partial=request.method == 'PATCH')
             serializer.is_valid(raise_exception=True)
             serializer.save()
-            # Yangilanganini qaytarish uchun ham UserSettingsSerializer
+            # Yangilangan ma'lumotni ham UserSettingsSerializer bilan qaytaramiz
             return Response(UserSettingsSerializer(user_settings).data)
 
     @action(detail=False, methods=['get'], url_path='test-history')
@@ -625,6 +629,7 @@ class AdminPaymentStatisticsView(generics.GenericAPIView):
 #  AdminUniversityViewSet, AdminAchievementViewSet, AdminCourseViewSet, AdminLessonViewSet
 #  avvalgi kodimdagi kabi qoladi, chunki ular urls.py ga mos edi)
 
+
 class AdminUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().prefetch_related('settings', 'rating', 'groups')
     permission_classes = [IsAdminUser]
@@ -635,79 +640,106 @@ class AdminUserViewSet(viewsets.ModelViewSet):
     ordering = ['-date_joined']
 
     def get_serializer_class(self):
-        if self.action == 'list': return AdminUserListSerializer
-        elif self.action == 'test_history': return UserTestResultSerializer
-        elif self.action == 'payment_history': return PaymentSerializer
-        elif self.action == 'statistics': return serializers.Serializer # Maxsus statistika serializeri kerak bo'lishi mumkin
-        return UserSerializer # Create/Retrieve/Update uchun to'liq ma'lumot
+        # FAQAT standart actionlar uchun serializer qaytaramiz
+        if self.action == 'list':
+            return AdminUserListSerializer
+        elif self.action == 'create':
+            return AdminUserCreateSerializer
+        elif self.action in ['update', 'partial_update']:
+            return AdminUserUpdateSerializer
+        elif self.action == 'retrieve':
+            return UserSerializer
+        # Custom actionlar uchun serializer qaytarmaymiz,
+        # swagger_auto_schema ga ishonamiz
+        # Agar shunda ham ishlamasa, default serializer qaytarish kerak bo'ladi
+        return None # <<<--- O'ZGARTIRISHLAR ---<<<
+
+    @action(detail=True, methods=['get'], url_path='payment-history')
+    @swagger_auto_schema(
+        operation_summary="Foydalanuvchining to'lov tarixini olish",
+        responses={status.HTTP_200_OK: PaymentSerializer(many=True)}
+    )
+    def user_payment_history(self, request, pk=None):
+        user = self.get_object()
+        payments = Payment.objects.filter(user=user).order_by('-created_at')
+        # Serializerni aniq chaqiramiz:
+        serializer = PaymentSerializer(payments, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='statistics')
+    @swagger_auto_schema(
+        operation_summary="Foydalanuvchi statistikasini olish",
+        responses={status.HTTP_200_OK: AdminUserStatisticsDetailSerializer()}
+    )
+    def user_statistics(self, request, pk=None):
+        user = self.get_object()
+        # ... (Statistika hisoblash avvalgidek) ...
+        completed_tests = UserTestResult.objects.filter(user=user, status='completed').count()
+        avg_score_agg = UserTestResult.objects.filter(user=user, status='completed').aggregate(avg=Avg('percentage'))
+        avg_score = avg_score_agg['avg'] if avg_score_agg['avg'] else 0
+        total_payments = Payment.objects.filter(user=user, status='successful', amount__gt=0).aggregate(total=Sum('amount'))['total'] or decimal.Decimal('0.00')
+        data = {
+            "completed_tests": completed_tests,
+            "average_score": round(avg_score, 2),
+            "total_payments": total_payments,
+        }
+        # Serializerni aniq chaqiramiz:
+        serializer = AdminUserStatisticsDetailSerializer(data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='test-history')
+    @swagger_auto_schema(
+        operation_summary="Foydalanuvchining test tarixini olish",
+        responses={status.HTTP_200_OK: UserTestResultSerializer(many=True)}
+    )
+    def user_test_history(self, request, pk=None):
+        user = self.get_object()
+        results = UserTestResult.objects.filter(user=user).select_related('test', 'test__subject').order_by('-start_time')
+        # Serializerni aniq chaqiramiz:
+        serializer = UserTestResultSerializer(results, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    # --- Boshqa actionlar o'zgarishsiz qoladi ---
+    @action(detail=True, methods=['post'], url_path='add-balance')
+    @swagger_auto_schema(
+        operation_summary="Foydalanuvchi hisobini to'ldirish (Admin)",
+        request_body=AdminAddBalanceSerializer,
+        responses={status.HTTP_200_OK: UserSerializer()}
+    )
+    def add_balance(self, request, pk=None):
+        user = self.get_object()
+        balance_serializer = AdminAddBalanceSerializer(data=request.data)
+        balance_serializer.is_valid(raise_exception=True)
+        amount = balance_serializer.validated_data['amount']
+        description = balance_serializer.validated_data.get('description', _('Admin tomonidan hisob to\'ldirildi'))
+        Payment.objects.create(
+            user=user, amount=amount, payment_type='bonus', status='successful',
+            payment_method='admin', description=description
+        )
+        user.refresh_from_db()
+        user_serializer = UserSerializer(user, context={'request': request})
+        return Response(user_serializer.data)
 
     @action(detail=True, methods=['post'], url_path='block')
+    @swagger_auto_schema(responses={status.HTTP_200_OK: UserSerializer()})
     def block_user(self, request, pk=None):
         user = self.get_object()
         user.is_blocked = True; user.is_active = False
         user.save(update_fields=['is_blocked', 'is_active'])
-        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
+        serializer = UserSerializer(user, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='unblock')
+    @swagger_auto_schema(responses={status.HTTP_200_OK: UserSerializer()})
     def unblock_user(self, request, pk=None):
         user = self.get_object()
         user.is_blocked = False; user.is_active = True
         user.save(update_fields=['is_blocked', 'is_active'])
-        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
-
-    @action(detail=True, methods=['post'], url_path='add-balance')
-    def add_balance(self, request, pk=None):
-        user = self.get_object()
-        # ... (Balans qo'shish logikasi avvalgidek) ...
-        amount_str = request.data.get('amount')
-        description = request.data.get('description', 'Admin tomonidan hisob to\'ldirildi')
-        try: amount_decimal = decimal.Decimal(amount_str)
-        except: raise ValidationError({"amount": _("Noto'g'ri summa formati.")})
-        if amount_decimal <= 0: raise ValidationError({"amount": _("Summa musbat bo'lishi kerak.")})
-        Payment.objects.create(
-            user=user, amount=amount_decimal, payment_type='bonus', status='successful',
-            payment_method='admin', description=description
-        ) # Balans Payment.save() da yangilanadi
-        user.refresh_from_db()
-        return Response(UserSerializer(user, context=self.get_serializer_context()).data)
-
-    @action(detail=True, methods=['get'], url_path='test-history')
-    def test_history(self, request, pk=None):
-        user = self.get_object()
-        results = UserTestResult.objects.filter(user=user).select_related('test', 'test__subject').order_by('-start_time')
-        page = self.paginate_queryset(results)
-        serializer_context = self.get_serializer_context() # Contextni olish
-        if page is not None:
-            serializer = self.get_serializer(page, many=True, context=serializer_context)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(results, many=True, context=serializer_context)
+        serializer = UserSerializer(user, context={'request': request})
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'], url_path='payment-history')
-    def payment_history(self, request, pk=None):
-        user = self.get_object()
-        payments = Payment.objects.filter(user=user).order_by('-created_at')
-        page = self.paginate_queryset(payments)
-        serializer_context = self.get_serializer_context() # Contextni olish
-        if page is not None:
-            serializer = self.get_serializer(page, many=True, context=serializer_context)
-            return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(payments, many=True, context=serializer_context)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'], url_path='statistics')
-    def statistics(self, request, pk=None):
-         user = self.get_object()
-         # ... (Statistika hisoblash avvalgidek) ...
-         completed_tests = UserTestResult.objects.filter(user=user, status='completed').count()
-         avg_score = UserTestResult.objects.filter(user=user, status='completed').aggregate(avg=Avg('percentage'))['avg'] or 0
-         total_payments = Payment.objects.filter(user=user, status='successful', amount__gt=0).aggregate(total=Sum('amount'))['total'] or 0
-         # Serializer ishlatish yaxshiroq
-         return Response({
-             "completed_tests": completed_tests,
-             "average_score": round(avg_score, 2),
-             "total_payments": total_payments,
-         })
+    def perform_create(self, serializer):
+        serializer.save()
 
 class AdminTestViewSet(viewsets.ModelViewSet):
     queryset = Test.objects.select_related('subject', 'created_by').prefetch_related('questions')

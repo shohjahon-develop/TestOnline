@@ -119,10 +119,10 @@ LOGGING = {
 }
 # Simple JWT
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True, # Requires adding 'rest_framework_simplejwt.token_blacklist' to INSTALLED_APPS
+    'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
@@ -134,18 +134,17 @@ SIMPLE_JWT = {
 # CORS
 CORS_ALLOW_ALL_ORIGINS = True # Set to False in Production
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000", # Your frontend dev server
+    "http://localhost:3000",
     # "https://your-production-frontend.com",
 ]
 CORS_ALLOW_CREDENTIALS = True
 
-# Email (Replace with your actual credentials and consider environment variables)
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_USE_TLS = True
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
-EMAIL_HOST_USER = os.environ.get('EMAIL_USER', 'your_email@gmail.com') # Use env var
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASSWORD', 'your_app_password') # Use env var
+EMAIL_HOST_USER = 'mrzaqulovbegzod@gmail.com'
+EMAIL_HOST_PASSWORD = 'lrkahalnlrqouubm'
 
 # Logging
 LOGGING = {

@@ -302,23 +302,35 @@ class TestListSerializer(serializers.ModelSerializer):
     difficulty_display = serializers.CharField(source='get_difficulty_display', read_only=True)
     type_display = serializers.CharField(source='get_test_type_display', read_only=True)
     price_display = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta:
         model = Test
         fields = ('id', 'title', 'subject', 'subject_name', 'subject_icon', 'test_type', 'type_display', 'question_count',
-                  'difficulty', 'difficulty_display', 'price', 'price_display', 'time_limit', 'reward_points')
+                  'difficulty', 'difficulty_display', 'price', 'price_display', 'time_limit', 'reward_points',  'status', 'created_at',  'status_display')
+        read_only_fields = ('id', 'subject_name', 'subject_icon', 'type_display', 'price_display',
+                            'difficulty_display', 'question_count', 'status_display', 'created_at')
 
     def get_price_display(self, obj):
         if obj.test_type == 'free' or obj.price <= 0:
             return _("Bepul")
-        return f"{obj.price:,.0f} so'm".replace(',', ' ')
+        # Narxni formatlash (agar kerak bo'lsa)
+        try:
+            # Formatni yaxshilash: 50000 -> 50 000 so'm
+            return f"{int(obj.price):,} so'm".replace(',', ' ')
+        except (ValueError, TypeError):
+             return f"{obj.price} so'm" # Agar int ga o'girib bo'lmasa
 
 
 class TestDetailSerializer(TestListSerializer):
+    # TestListSerializerdan barcha maydonlarni meros oladi, shu jumladan status va created_at
     questions = QuestionSerializer(many=True, read_only=True)
 
-    class Meta(TestListSerializer.Meta):
+    class Meta(TestListSerializer.Meta): # Asosiy Meta'dan meros olish
+        # Asosiy maydonlarga qo'shimcha description va questions ni qo'shamiz
         fields = TestListSerializer.Meta.fields + ('description', 'questions')
+        # O'qish uchun maydonlarga qo'shimchalar (agar kerak bo'lsa)
+        read_only_fields = TestListSerializer.Meta.read_only_fields + ('description', 'questions')
 
 
 class SubmitAnswerSerializer(serializers.Serializer):
@@ -705,58 +717,103 @@ class AdminUserListSerializer(serializers.ModelSerializer):
 # Use UserSerializer for Admin User Detail
 
 class AdminUserCreateSerializer(serializers.ModelSerializer):
+    """Admin tomonidan yangi foydalanuvchi yaratish uchun serializer (password2 va is_blockedsiz)."""
+    # Majburiy maydonlar
+    email = serializers.EmailField(required=True)
+    full_name = serializers.CharField(required=True)
+    phone_number = serializers.CharField(required=True)
+    role = serializers.ChoiceField(choices=User.ROLE_CHOICES, required=True)
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    password2 = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'}, label=_("Confirm Password"))
+
+    # Admin belgilashi mumkin bo'lgan status va ruxsatlar (ixtiyoriy)
+    is_active = serializers.BooleanField(required=False, default=True)
+    is_staff = serializers.BooleanField(required=False, default=False)
+    is_superuser = serializers.BooleanField(required=False, default=False)
+    # is_blocked = serializers.BooleanField(...) # <<<--- BU QATOR O'CHIRILDI ---<<<
 
     class Meta:
         model = User
-        fields = ('email', 'full_name', 'phone_number', 'role', 'password', 'password2',
-                  'is_active', 'is_staff', 'is_superuser') # Allow setting permissions
-        extra_kwargs = {
-            'email': {'required': True},
-            'full_name': {'required': True},
-            'phone_number': {'required': True},
-            'role': {'required': True},
-        }
+        fields = (
+            'email', 'full_name', 'phone_number', 'role',
+            'password',
+            'is_active', 'is_staff', 'is_superuser'
+            # <<<--- 'is_blocked' O'CHIRILDI ---<<<
+        )
+
+    # validate_phone_number va validate_email (avvalgidek)
+    def validate_phone_number(self, value):
+        if User.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError(_("Bu telefon raqam allaqachon mavjud."))
+        if not value.startswith('+998') or len(value) != 13 or not value[1:].isdigit():
+             raise serializers.ValidationError(_("Telefon raqam +998XXXXXXXXX formatida bo'lishi kerak."))
+        return value
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError(_("Bu email manzili allaqachon mavjud."))
+        return value
 
     def validate(self, data):
-        if data['password'] != data['password2']:
-            raise serializers.ValidationError({"password": _("Parollar mos kelmadi.")})
+        # Kuchli parol tekshiruvi
         try:
             password_validation.validate_password(data['password'])
         except Exception as e:
-            raise serializers.ValidationError({"password": list(e.messages)})
+             raise serializers.ValidationError({"password": list(e.messages)})
         return data
 
     def create(self, validated_data):
-        validated_data.pop('password2')
-        # Use create_user to handle password hashing and role setting
+        # UserManager.create_user ga faqat fields da ko'rsatilgan ma'lumotlar uzatiladi
+        # create_user is_blocked ni False qilib yaratadi (User modelidagi default)
         user = User.objects.create_user(**validated_data)
+        # is_blocked ni alohida o'rnatish kerak emas
+        # user.is_blocked = validated_data.get('is_blocked', False) # <<<--- BU QATOR O'CHIRILDI ---<<<
+        # user.save(update_fields=['is_blocked']) # <<<--- BU QATOR O'CHIRILDI ---<<<
         return user
 
 
 class AdminUserUpdateSerializer(serializers.ModelSerializer):
-    """Admin updating user - can change role, status, etc."""
+    """Admin tomonidan mavjud foydalanuvchini tahrirlash uchun."""
     class Meta:
         model = User
-        fields = ( # Fields admin can modify
-            'full_name', 'phone_number', 'email', # Admin can change email too
+        # Admin o'zgartirishi mumkin bo'lgan BARCHA maydonlar (paroldan tashqari)
+        fields = (
+            'email', 'full_name', 'phone_number',
             'birth_date', 'gender', 'profile_picture',
             'grade', 'region', 'study_place', 'address',
             'target_university', 'target_faculty', 'about_me',
-            'role', 'is_active', 'is_blocked', 'is_staff', 'is_superuser'
+            'role', 'balance', # Admin balansni ham o'zgartira olsinmi? (Ehtiyot bo'lish kerak)
+            'is_active', 'is_blocked', 'is_staff', 'is_superuser'
         )
         extra_kwargs = {
-            'email': {'required': False}, # Make fields optional for PATCH
+            # Barcha maydonlar PATCH uchun ixtiyoriy bo'lishi kerak
+            'email': {'required': False},
             'full_name': {'required': False},
             'phone_number': {'required': False},
-             # ... make others required=False
+            'birth_date': {'required': False, 'allow_null': True},
+            'gender': {'required': False, 'allow_null': True},
+            'profile_picture': {'required': False, 'allow_null': True},
+            'grade': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'region': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'study_place': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'address': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_university': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_faculty': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'about_me': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'role': {'required': False},
+            'balance': {'required': False}, # Ehtiyotkorlik bilan ishlatish kerak
+            'is_active': {'required': False},
+            'is_blocked': {'required': False},
+            'is_staff': {'required': False},
+            'is_superuser': {'required': False},
         }
 
+    # Email va telefon raqam uchun validation (avvalgidek)
     def validate_phone_number(self, value):
-         # Allow admin to set any number as long as it's unique (excluding current user)
          if value and User.objects.filter(phone_number=value).exclude(pk=self.instance.pk).exists():
              raise serializers.ValidationError(_("Bu telefon raqam boshqa foydalanuvchiga tegishli."))
+         # Format tekshiruvi
+         if value and (not value.startswith('+998') or len(value) != 13 or not value[1:].isdigit()):
+              raise serializers.ValidationError(_("Telefon raqam +998XXXXXXXXX formatida bo'lishi kerak."))
          return value
 
     def validate_email(self, value):
@@ -766,18 +823,51 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
 
 
 class AdminTestListSerializer(TestListSerializer):
+    # TestListSerializerdan meros oladi, qo'shimcha admin maydonlari
      status_display = serializers.CharField(source='get_status_display', read_only=True)
      created_by_name = serializers.CharField(source='created_by.full_name', read_only=True, default='')
+     # `status` maydoni TestListSerializerdan keladi va tahrirlash uchun kerak
      class Meta(TestListSerializer.Meta):
         fields = ('id', 'title', 'subject_name', 'question_count', 'difficulty_display',
-                  'created_at', 'status', 'status_display', 'created_by_name') # Added status for editing
+                  'created_at', 'status', 'status_display', 'created_by_name')
+        # Admin ro'yxatdan turib statusni o'zgartirishi uchun read_only dan olib tashlaymiz
+        read_only_fields = ('id', 'subject_name', 'question_count', 'difficulty_display',
+                          'created_at', 'status_display', 'created_by_name')
+
 
 class AdminTestCreateUpdateSerializer(serializers.ModelSerializer):
+    # Bu serializerda status yozish uchun mavjud
+    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all()) # Select uchun ID ishlatish
+
     class Meta:
         model = Test
-        fields = ('title', 'subject', 'description', # 'question_count' is read-only or updated internally
+        fields = ('title', 'subject', 'description', # 'question_count' avtomatik hisoblanadi
                   'difficulty', 'test_type',
                   'price', 'reward_points', 'time_limit', 'status')
+        extra_kwargs = {
+            # Agar update paytida ba'zi maydonlar ixtiyoriy bo'lishi kerak bo'lsa
+             'description': {'required': False, 'allow_blank': True},
+             'price': {'required': False},
+             'reward_points': {'required': False},
+        }
+
+    def validate_price(self, value):
+        # Narx manfiy bo'lmasligi kerak
+        if value < 0:
+             raise serializers.ValidationError(_("Narx manfiy bo'lishi mumkin emas."))
+        return value
+
+    def validate(self, data):
+        # Agar tur 'free' bo'lsa, narxni 0 qilish
+        test_type = data.get('test_type', getattr(self.instance, 'test_type', None))
+        price = data.get('price', getattr(self.instance, 'price', 0))
+
+        if test_type == 'free':
+            data['price'] = 0
+        elif price <= 0 and test_type == 'premium':
+            # Agar premium bo'lsa va narx kiritilmagan yoki 0 bo'lsa xatolik (yoki default narx belgilash)
+             raise serializers.ValidationError({'price': _("Premium test uchun narx kiritilishi shart.")})
+        return data
 
 class AdminQuestionSerializer(serializers.ModelSerializer):
      class Meta:
@@ -860,6 +950,16 @@ class GraphDataPointSerializer(serializers.Serializer):
 #     active_students = DetailedStatSerializer()
 #     total_tests = DetailedStatSerializer() # Or tests taken
 #     total_revenue = DetailedStatSerializer()
+class AdminUserStatisticsDetailSerializer(serializers.Serializer): # Read-only bo'lgani uchun oddiy Serializerdan meros olamiz
+    completed_tests = serializers.IntegerField()
+    average_score = serializers.FloatField()
+    total_payments = serializers.DecimalField(max_digits=12, decimal_places=2)
+    # Agar graph_data ham bo'lsa:
+    # graph_data = GraphDataPointSerializer(many=True, read_only=True) # Agar GraphDataPointSerializer mavjud bo'lsa
+
+    class Meta:
+         read_only_fields = ('completed_tests', 'average_score', 'total_payments') # Faqat o'qish uchun
+
 
 class AdminUserStatisticsSerializer(serializers.Serializer):
      users_graph = GraphDataPointSerializer(many=True)
