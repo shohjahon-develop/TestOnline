@@ -17,7 +17,7 @@ from .views import (
     # Admin Dashboard
     AdminDashboardStatsView, AdminDashboardLatestListsView,
     # Admin Statistics (Separate Views)
-    AdminUserStatisticsView, AdminTestStatisticsView, AdminPaymentStatisticsView,
+    AdminCombinedStatisticsView,
     # Admin CRUD ViewSets
     AdminUserViewSet, AdminTestViewSet, AdminQuestionViewSet, AdminMaterialViewSet,
     AdminPaymentViewSet, AdminUniversityViewSet, AdminAchievementViewSet,
@@ -89,9 +89,7 @@ urlpatterns = [
     path('admin/dashboard/latest/', AdminDashboardLatestListsView.as_view(), name='admin-dashboard-latest'),
 
     # Statistics (using separate GenericAPIViews)
-    path('admin/statistics/users/', AdminUserStatisticsView.as_view(), name='admin-stats-users'),
-    path('admin/statistics/tests/', AdminTestStatisticsView.as_view(), name='admin-stats-tests'),
-    path('admin/statistics/payments/', AdminPaymentStatisticsView.as_view(), name='admin-stats-payments'),
+    path('admin/statistics/', AdminCombinedStatisticsView.as_view(), name='admin-combined-statistics'),
     # path('admin/statistics/courses/', AdminCourseStatisticsView.as_view(), name='admin-stats-courses'), # Agar kerak bo'lsa
 
     # Admin CRUD ViewSets (using admin_router and nested routers)

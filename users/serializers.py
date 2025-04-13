@@ -1,7 +1,3 @@
-
-
-
-# users/serializers.py
 import decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model, password_validation, authenticate
@@ -22,6 +18,37 @@ except ImportError:
 
 User = get_user_model()
 
+# --- Helper Serializers ---
+class ValueChangeTargetIntSerializer(serializers.Serializer): # <<< NOM O'ZGARTIRILDI
+    """Statistika kartasi uchun: Qiymat (int), Foiz o'zgarishi, Maqsad (int)."""
+    value = serializers.IntegerField()
+    change_percentage = serializers.FloatField(allow_null=True)
+    target = serializers.IntegerField()
+
+class ValueChangeTargetDecimalSerializer(serializers.Serializer):
+    """Statistika kartasi uchun: Qiymat (Decimal), Foiz o'zgarishi, Maqsad (Decimal/Int)."""
+    value = serializers.DecimalField(max_digits=15, decimal_places=2)
+    change_percentage = serializers.FloatField(allow_null=True)
+    target = serializers.DecimalField(max_digits=15, decimal_places=2) # Maqsad ham Decimal bo'lishi mumkin
+
+class GraphDataPointSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    value = serializers.IntegerField() # Yoki DecimalField
+
+class DetailedStatSerializer(serializers.Serializer):
+    """Umumiy statistika uchun: qiymat (int/float/str) va o'zgarish foizi."""
+    value = serializers.IntegerField() # Default, lekin boshqa serializerlarda override qilinishi mumkin
+    change_percentage = serializers.FloatField(allow_null=True)
+
+class DetailedDecimalStatSerializer(DetailedStatSerializer):
+    """Statistika uchun, qiymat Decimal bo'lganda."""
+    value = serializers.DecimalField(max_digits=15, decimal_places=2)
+
+class DetailedCharStatSerializer(DetailedStatSerializer):
+    """Statistika uchun, qiymat matn bo'lganda (masalan, vaqt)."""
+    value = serializers.CharField()
+
+
 # --- Authentication Serializers ---
 
 class SignupSerializer(serializers.ModelSerializer):
@@ -30,7 +57,6 @@ class SignupSerializer(serializers.ModelSerializer):
     fullName = serializers.CharField(source='full_name', required=True, label=_("Full Name"))
     phone = serializers.CharField(source='phone_number', required=True, label=_("Phone Number"))
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    # password2 olib tashlandi
     agreeToTerms = serializers.BooleanField(source='agreetoterms', required=True, write_only=True, label=_("Agree to Terms"))
 
     # Ixtiyoriy maydonlar (frontend nomlari bilan)
@@ -42,59 +68,44 @@ class SignupSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        # Frontend yuboradigan field nomlarini ko'rsatamiz
         fields = (
-            'email', 'fullName', 'phone', 'password', 'agreeToTerms', # password2 yo'q
+            'email', 'fullName', 'phone', 'password', 'agreeToTerms',
             'birthDate', 'gender', 'grade', 'region', 'school'
         )
-        # `extra_kwargs` da ham frontend nomlarini ishlatsa bo'ladi, lekin source borligi uchun shart emas
-        # Faqat password write_only bo'lishi muhim
         extra_kwargs = {
             'password': {'write_only': True},
         }
 
     # --- Validationlar ---
-    def validate_email(self, value): # Bu nom to'g'ri
+    def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(_("Bu email manzili allaqachon ro'yxatdan o'tgan."))
         return value
 
     def validate_phone(self, value): # Frontend nomi 'phone'
-        # phone maydoniga kelgan qiymatni validate qilamiz
         if not value:
              raise serializers.ValidationError(_("Telefon raqam kiritilishi shart."))
         if not value.startswith('+998') or len(value) != 13 or not value[1:].isdigit():
              raise serializers.ValidationError(_("Telefon raqam +998XXXXXXXXX formatida bo'lishi kerak."))
-        # Model maydoni (`phone_number`) bo'yicha tekshiramiz
         if User.objects.filter(phone_number=value).exists():
             raise serializers.ValidationError(_("Bu telefon raqam allaqachon ro'yxatdan o'tgan."))
         return value
 
     def validate(self, data):
-        # agreeToTerms (frontend nomi) bilan tekshiramiz
-        if not data.get('agreetoterms'):
+        if not data.get('agreetoterms'): # Model field nomi bilan tekshiramiz
             raise serializers.ValidationError({"agreeToTerms": _("Ro'yxatdan o'tish uchun shartlarga rozilik bildiring.")})
-        # password2 tekshiruvi olib tashlandi
-        # Kuchli parol tekshiruvi
         try:
-            # 'password' kaliti bilan (frontend nomi)
             password_validation.validate_password(data['password'])
         except Exception as e:
             raise serializers.ValidationError({"password": list(e.messages)})
-
-        # Role avtomatik belgilanadi create() yoki create_user() ichida
         return data
 
     def create(self, validated_data):
-        # password2 ni pop qilish kerak emas
-        # agreeToTerms ni pop qilish shart emas, source borligi uchun create_user ga to'g'ri nom bilan ketadi
-        # Faqat create_user ga role='student' ekanligini berish kerak
         validated_data['role'] = 'student'
-        # `source` tufayli validated_data ichida model field nomlari bo'ladi
-        # Masalan: {'email': '...', 'full_name': '...', 'phone_number': '...', 'password': '...'}
         user = User.objects.create_user(**validated_data)
-        # UserManager.create_user avtomatik rating va settings yaratishi kerak (avvalgi kod bo'yicha)
+        # UserManager.create_user avtomatik rating va settings yaratishi kerak
         return user
+
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True, label=_("Email"))
@@ -104,52 +115,48 @@ class LoginSerializer(serializers.Serializer):
         style={'input_type': 'password'},
         label=_("Password")
     )
+    # Read-only fields for the response
     token = serializers.CharField(read_only=True)
     refresh_token = serializers.CharField(read_only=True)
-    user = serializers.SerializerMethodField(read_only=True)
+    user = serializers.SerializerMethodField(read_only=True) # Nested user info
+
+    # Internal field to hold user instance after validation
+    _user_instance = None
 
     def validate(self, data):
         email = data.get('email')
         password = data.get('password')
         request = self.context.get('request')
 
-        # Authenticate using email and password
         user = authenticate(request=request, email=email, password=password)
 
         if user is None:
-            raise serializers.ValidationError(
-                _("Email yoki parol noto'g'ri."),
-                code='authorization'
-            )
+            raise serializers.ValidationError(_("Email yoki parol noto'g'ri."), code='authorization')
         if not user.is_active:
-            raise serializers.ValidationError(
-                _("Foydalanuvchi akkaunti faol emas."),
-                code='authorization'
-            )
+            raise serializers.ValidationError(_("Foydalanuvchi akkaunti faol emas."), code='authorization')
         if user.is_blocked:
-            raise serializers.ValidationError(
-                _("Foydalanuvchi akkaunti bloklangan."),
-                code='authorization'
-            )
+            raise serializers.ValidationError(_("Foydalanuvchi akkaunti bloklangan."), code='authorization')
 
         # Generate tokens
         refresh = RefreshToken.for_user(user)
         data['refresh_token'] = str(refresh)
         data['token'] = str(refresh.access_token)
-        data['user_instance'] = user  # Store user instance for get_user method
+        self._user_instance = user  # Store user instance for get_user method
 
         return data
 
     def get_user(self, obj):
-        user_instance = obj.get('user_instance')
+        # Retrieve the stored user instance
+        user_instance = self._user_instance
         if user_instance:
-            # Return user info including role
+            # Return basic user info needed after login
             return {
-                'id': user_instance.id,  # Fixed magnaid to id
+                'id': user_instance.id,
                 'full_name': user_instance.full_name,
                 'email': user_instance.email,
-                'role': user_instance.role,  # Direct role value
-                'role_display': user_instance.get_role_display(),  # Human-readable role
+                'role': user_instance.role,
+                'role_display': user_instance.get_role_display(),
+                'profile_picture': self.context['request'].build_absolute_uri(user_instance.profile_picture.url) if user_instance.profile_picture else None, # Include profile picture URL
             }
         return None
 
@@ -159,39 +166,35 @@ class LoginSerializer(serializers.Serializer):
 class UserSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserSettings
-        exclude = ('user',) # Exclude user foreign key
+        exclude = ('user',)
 
 class UserRatingSerializer(serializers.ModelSerializer):
     level_progress_percentage = serializers.SerializerMethodField()
 
     class Meta:
         model = UserRating
-        exclude = ('user',) # Exclude user foreign key
+        exclude = ('user',)
         read_only_fields = ('total_score', 'rank', 'level', 'points_to_next_level', 'current_level_points', 'last_updated')
 
     def get_level_progress_percentage(self, obj):
-         # Calculate progress towards the next level threshold
+         if obj.points_to_next_level is None: # Max level
+             return 100.0
          current_level_threshold = obj.LEVEL_THRESHOLDS.get(obj.level, 0)
-         next_level_threshold = obj.points_to_next_level
-
-         if next_level_threshold is None or next_level_threshold <= current_level_threshold:
-             return 100.0 # Max level or invalid threshold
-
-         total_points_for_level = next_level_threshold - current_level_threshold
-         points_earned_in_level = obj.total_score - current_level_threshold
-
+         total_points_for_level = obj.points_to_next_level - current_level_threshold
          if total_points_for_level > 0:
+             points_earned_in_level = obj.total_score - current_level_threshold
              percentage = (points_earned_in_level / total_points_for_level) * 100
-             return round(max(0, min(percentage, 100)), 2) # Ensure between 0 and 100
+             return round(max(0, min(percentage, 100)), 2)
          return 0.0
 
-
 class UserSerializer(serializers.ModelSerializer):
+    """For retrieving user details (profile view, admin detail view)."""
     settings = UserSettingsSerializer(read_only=True)
     rating = UserRatingSerializer(read_only=True)
     role_display = serializers.CharField(source='get_role_display', read_only=True)
-    gender_display = serializers.CharField(source='get_gender_display', read_only=True)
+    gender_display = serializers.CharField(source='get_gender_display', read_only=True, allow_null=True)
     balance_display = serializers.CharField(source='get_balance_display', read_only=True)
+    profile_picture = serializers.ImageField(max_length=None, use_url=True, read_only=True)
 
     class Meta:
         model = User
@@ -202,9 +205,12 @@ class UserSerializer(serializers.ModelSerializer):
             'address', 'target_university', 'target_faculty', 'about_me',
             'settings', 'rating'
         )
-        read_only_fields = ('id', 'email', 'role', 'role_display', 'balance', 'balance_display', 'date_joined', 'is_active', 'is_blocked', 'settings', 'rating')
+        read_only_fields = ('id', 'email', 'role', 'role_display', 'balance', 'balance_display', 'date_joined', 'is_active', 'is_blocked', 'settings', 'rating', 'profile_picture')
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """For user updating their own profile."""
+    profile_picture = serializers.ImageField(max_length=None, use_url=True, required=False, allow_null=True)
+
     class Meta:
         model = User
         fields = (
@@ -213,18 +219,19 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             'target_university', 'target_faculty', 'about_me'
         )
         extra_kwargs = {
+            # All fields are optional for PATCH requests
             'profile_picture': {'required': False, 'allow_null': True},
             'full_name': {'required': False},
             'phone_number': {'required': False},
             'birth_date': {'required': False, 'allow_null': True},
             'gender': {'required': False, 'allow_null': True},
-            'grade': {'required': False, 'allow_blank': True},
-            'region': {'required': False, 'allow_blank': True},
-            'study_place': {'required': False, 'allow_blank': True},
-            'address': {'required': False, 'allow_blank': True},
-            'target_university': {'required': False, 'allow_blank': True},
-            'target_faculty': {'required': False, 'allow_blank': True},
-            'about_me': {'required': False, 'allow_blank': True},
+            'grade': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'region': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'study_place': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'address': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_university': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_faculty': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'about_me': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def validate_phone_number(self, value):
@@ -238,51 +245,57 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return value
 
 class ChangePasswordSerializer(serializers.Serializer):
-    old_password = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'})
-    new_password = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'})
-    new_password2 = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'}, label=_("Confirm New Password"))
+    currentPassword = serializers.CharField(source='old_password', required=True, write_only=True, style={'input_type': 'password'})
+    newPassword = serializers.CharField(source='new_password', required=True, write_only=True, style={'input_type': 'password'})
+    confirmPassword = serializers.CharField(source='new_password2', required=True, write_only=True, style={'input_type': 'password'}, label=_("Confirm New Password"))
 
-    def validate_old_password(self, value):
+    def validate_currentPassword(self, value): # Frontend nomi bilan
         user = self.context['request'].user
         if not user.check_password(value):
             raise serializers.ValidationError(_("Joriy parol noto'g'ri."))
         return value
 
     def validate(self, data):
-        if data['new_password'] != data['new_password2']:
-            raise serializers.ValidationError({"new_password": _("Yangi parollar mos kelmadi.")}) # Error on new_password field
+        if data['new_password'] != data['new_password2']: # Model nomlari bilan ichki tekshiruv
+            raise serializers.ValidationError({"newPassword": _("Yangi parollar mos kelmadi.")}) # Frontend nomiga error
         try:
             password_validation.validate_password(data['new_password'], user=self.context['request'].user)
         except Exception as e:
-            raise serializers.ValidationError({"new_password": list(e.messages)})
+            raise serializers.ValidationError({"newPassword": list(e.messages)}) # Frontend nomiga error
         return data
 
     def save(self, **kwargs):
         user = self.context['request'].user
+        # Ichki nom 'new_password' bilan saqlash
         user.set_password(self.validated_data['new_password'])
         user.save()
         return user
 
 class ProfileSettingsUpdateSerializer(serializers.ModelSerializer):
+    """For updating user settings via profile."""
     class Meta:
         model = UserSettings
+        # User Settings modelidagi barcha tahrirlanadigan maydonlar
         fields = (
             'language', 'theme', 'autoplay_videos', 'sound_effects', 'high_contrast',
             'notify_email', 'notify_sms', 'notify_push',
             'notify_test_updates', 'notify_course_updates', 'notify_payments', 'notify_reminders',
-            'two_factor_enabled', 'weekly_reports', 'personalized_recommendations'
+            'two_factor_enabled', # two_factor_method qo'shilishi mumkin
+            'weekly_reports', 'personalized_recommendations'
         )
 
 
 # --- Subject Serializer ---
 class SubjectSerializer(serializers.ModelSerializer):
+    icon = serializers.ImageField(max_length=None, use_url=True, read_only=True)
     class Meta:
         model = Subject
         fields = ('id', 'name', 'icon')
 
+
 # --- Test & Question Serializers ---
 class QuestionSerializer(serializers.ModelSerializer):
-    """Serializer for displaying questions during a test (without correct answer)."""
+    """For displaying questions during a test (without correct answer)."""
     difficulty_display = serializers.CharField(source='get_difficulty_display', read_only=True)
 
     class Meta:
@@ -291,14 +304,13 @@ class QuestionSerializer(serializers.ModelSerializer):
                   'option_a', 'option_b', 'option_c', 'option_d')
 
 class QuestionResultSerializer(QuestionSerializer):
-    """Serializer for displaying question details in results (with correct answer and explanation)."""
+    """For displaying question details in results (with correct answer and explanation)."""
     class Meta(QuestionSerializer.Meta):
         fields = QuestionSerializer.Meta.fields + ('correct_answer', 'explanation',)
 
 
 class TestListSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(source='subject.name', read_only=True)
-    subject_icon = serializers.ImageField(source='subject.icon', read_only=True, use_url=True)
+    subject = SubjectSerializer(read_only=True) # Nested Subject info
     difficulty_display = serializers.CharField(source='get_difficulty_display', read_only=True)
     type_display = serializers.CharField(source='get_test_type_display', read_only=True)
     price_display = serializers.SerializerMethodField()
@@ -306,42 +318,34 @@ class TestListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Test
-        fields = ('id', 'title', 'subject', 'subject_name', 'subject_icon', 'test_type', 'type_display', 'question_count',
-                  'difficulty', 'difficulty_display', 'price', 'price_display', 'time_limit', 'reward_points',  'status', 'created_at',  'status_display')
-        read_only_fields = ('id', 'subject_name', 'subject_icon', 'type_display', 'price_display',
-                            'difficulty_display', 'question_count', 'status_display', 'created_at')
+        fields = ('id', 'title', 'subject', 'test_type', 'type_display', 'question_count',
+                  'difficulty', 'difficulty_display', 'price', 'price_display', 'time_limit',
+                  'reward_points',  'status', 'status_display', 'created_at') # 'subject_name', 'subject_icon' olib tashlandi, 'subject' ichida
+        read_only_fields = ('id', 'subject', 'type_display', 'price_display', 'question_count',
+                            'difficulty_display', 'status_display', 'created_at', 'reward_points', 'time_limit')
 
     def get_price_display(self, obj):
         if obj.test_type == 'free' or obj.price <= 0:
             return _("Bepul")
-        # Narxni formatlash (agar kerak bo'lsa)
-        try:
-            # Formatni yaxshilash: 50000 -> 50 000 so'm
-            return f"{int(obj.price):,} so'm".replace(',', ' ')
-        except (ValueError, TypeError):
-             return f"{obj.price} so'm" # Agar int ga o'girib bo'lmasa
+        return f"{int(obj.price):,} so'm".replace(',', ' ')
 
 
 class TestDetailSerializer(TestListSerializer):
-    # TestListSerializerdan barcha maydonlarni meros oladi, shu jumladan status va created_at
-    questions = QuestionSerializer(many=True, read_only=True)
-
-    class Meta(TestListSerializer.Meta): # Asosiy Meta'dan meros olish
-        # Asosiy maydonlarga qo'shimcha description va questions ni qo'shamiz
+    questions = QuestionSerializer(many=True, read_only=True, source='questions.all') # questions.all() tartib uchun
+    # TestListSerializerdan meros oladi, qo'shimcha maydonlar:
+    class Meta(TestListSerializer.Meta):
         fields = TestListSerializer.Meta.fields + ('description', 'questions')
-        # O'qish uchun maydonlarga qo'shimchalar (agar kerak bo'lsa)
         read_only_fields = TestListSerializer.Meta.read_only_fields + ('description', 'questions')
 
 
 class SubmitAnswerSerializer(serializers.Serializer):
-    # Example: { "answers": { "101": "A", "102": "C", "105": "B" } }
     answers = serializers.DictField(
-        child=serializers.ChoiceField(choices=Question.ANSWER_CHOICES, allow_blank=True), # Allow skipping questions
+        child=serializers.ChoiceField(choices=Question.ANSWER_CHOICES, allow_blank=True),
         required=True
     )
 
 class UserAnswerSerializer(serializers.ModelSerializer):
-    question = QuestionResultSerializer(read_only=True) # Show full question details in results
+    question = QuestionResultSerializer(read_only=True) # Natijada savol ma'lumotlari
 
     class Meta:
         model = UserAnswer
@@ -363,41 +367,38 @@ class UserTestResultSerializer(serializers.ModelSerializer):
     def get_time_spent_display(self, obj):
         if obj.time_spent:
             total_seconds = int(obj.time_spent.total_seconds())
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
+            minutes, seconds = divmod(total_seconds, 60)
             return f"{minutes:02d}:{seconds:02d}"
         return None
 
     def get_score_display(self, obj):
-        # Display score relative to possible points based on questions answered
-        total_possible_points = sum(ua.question.points for ua in obj.user_answers.all() if ua.question)
-        # Or use test.questions.aggregate(Sum('points'))['points__sum'] if all questions were presented
-        return f"{obj.score} / {total_possible_points}" if total_possible_points else f"{obj.score}"
+        return f"{obj.score} / {obj.total_questions}"
 
 
 # --- Material Serializers ---
 class MaterialSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(source='subject.name', read_only=True)
+    subject = SubjectSerializer(read_only=True)
     type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     format_display = serializers.CharField(source='get_file_format_display', read_only=True)
     size_display = serializers.SerializerMethodField()
     download_url = serializers.SerializerMethodField()
     price_display = serializers.SerializerMethodField()
     uploaded_by_name = serializers.CharField(source='uploaded_by.full_name', read_only=True, default='')
+    file = serializers.FileField(max_length=None, use_url=True, read_only=True) # Faqat URL qaytarish
 
     class Meta:
         model = Material
-        fields = ('id', 'title', 'subject', 'subject_name', 'description', 'material_type', 'type_display',
+        fields = ('id', 'title', 'subject', 'description', 'material_type', 'type_display',
                   'file_format', 'format_display', 'file', 'link', 'size_mb', 'size_display',
                   'downloads_count', 'status', 'uploaded_at', 'uploaded_by_name', 'is_free', 'price', 'price_display', 'download_url')
-        read_only_fields = ('id', 'subject_name', 'type_display', 'format_display', 'size_display',
+        read_only_fields = ('id', 'subject', 'type_display', 'format_display', 'size_display', 'file',
                           'downloads_count', 'uploaded_at', 'uploaded_by_name', 'download_url', 'price_display')
 
     def get_size_display(self, obj):
         if obj.size_mb is not None:
-            return f"{obj.size_mb:.1f} MB" if obj.size_mb >= 1 else f"{obj.size_mb * 1024:.1f} KB"
+            return f"{obj.size_mb:.1f} MB" if obj.size_mb >= 1 else f"{obj.size_mb * 1024:.0f} KB"
         elif obj.file:
-             try: return f"{obj.file.size / (1024*1024):.1f} MB" if obj.file.size >= 1024*1024 else f"{obj.file.size / 1024:.1f} KB"
+             try: return f"{obj.file.size / (1024*1024):.1f} MB" if obj.file.size >= 1024*1024 else f"{obj.file.size / 1024:.0f} KB"
              except Exception: return "-"
         return "-"
 
@@ -408,9 +409,7 @@ class MaterialSerializer(serializers.ModelSerializer):
         return obj.link
 
     def get_price_display(self, obj):
-        if obj.is_free or obj.price <= 0:
-            return _("Bepul")
-        return f"{obj.price:,.0f} so'm".replace(',', ' ')
+        return _("Bepul") if obj.is_free or obj.price <= 0 else f"{int(obj.price):,} so'm".replace(',', ' ')
 
 
 # --- Payment Serializers ---
@@ -418,29 +417,29 @@ class PaymentSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source='user.email', read_only=True)
     type_display = serializers.CharField(source='get_payment_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    method_display = serializers.CharField(source='get_payment_method_display', read_only=True, allow_null=True)
     amount_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = ('id', 'user', 'user_email', 'amount', 'amount_display', 'payment_type', 'type_display',
                   'description', 'status', 'status_display', 'payment_method', 'method_display',
-                  'transaction_id', 'created_at', 'test', 'material', 'mock_test', 'course') # Added course
-        read_only_fields = ('id', 'user', 'user_email', 'amount_display', 'type_display', 'status_display',
-                          'method_display', 'created_at', 'transaction_id', 'test', 'material', 'mock_test', 'course')
+                  'transaction_id', 'created_at', 'test', 'material', 'mock_test', 'course')
+        read_only_fields = fields # Barchasi o'qish uchun
 
     def get_amount_display(self, obj):
-        sign = "+" if obj.amount >= 0 else "" # Amount itself can be negative for expenses
-        return f"{sign}{obj.amount:,.0f} so'm".replace(',', ' ')
+        # Amount manfiy bo'lishi mumkin (chiqimlar uchun)
+        sign = "+" if obj.amount >= 0 else ""
+        return f"{sign}{int(obj.amount):,} so'm".replace(',', ' ')
 
-
-import decimal
 
 class AddFundsSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=decimal.Decimal('1000'))
     payment_method = serializers.ChoiceField(
         choices=[choice for choice in Payment.PAYMENT_METHOD_CHOICES if choice[0] not in ['internal', 'admin']]
     )
+
+
 # --- Mock Test Serializers ---
 class MockTestListSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(source='get_mock_type_display', read_only=True)
@@ -453,7 +452,7 @@ class MockTestListSerializer(serializers.ModelSerializer):
                   'price', 'price_display', 'status', 'available_from')
 
     def get_price_display(self, obj):
-        return f"{obj.price:,.0f} so'm".replace(',', ' ') if obj.price > 0 else _("Bepul") # Assume 0 means free
+        return f"{int(obj.price):,} so'm".replace(',', ' ') if obj.price > 0 else _("Bepul")
 
 class MockTestDetailSerializer(MockTestListSerializer):
     class Meta(MockTestListSerializer.Meta):
@@ -476,12 +475,13 @@ class MockTestMaterialSerializer(serializers.ModelSerializer):
     language_display = serializers.CharField(source='get_language_display', read_only=True, default='')
     format_display = serializers.CharField(source='get_material_format_display', read_only=True)
     download_url = serializers.SerializerMethodField()
+    file = serializers.FileField(max_length=None, use_url=True, read_only=True)
 
     class Meta:
         model = MockTestMaterial
         fields = ('id', 'title', 'mock_test_type', 'type_display', 'language', 'language_display',
                   'description', 'file', 'link', 'material_format', 'format_display', 'is_free', 'download_url')
-        read_only_fields = ('id', 'type_display', 'language_display', 'format_display', 'download_url')
+        read_only_fields = ('id', 'type_display', 'language_display', 'format_display', 'download_url', 'file')
 
     def get_download_url(self, obj):
         request = self.context.get('request')
@@ -492,6 +492,7 @@ class MockTestMaterialSerializer(serializers.ModelSerializer):
 # --- University Serializer ---
 class UniversitySerializer(serializers.ModelSerializer):
     region_display = serializers.CharField(source='get_region_display', read_only=True)
+    logo = serializers.ImageField(max_length=None, use_url=True, read_only=True)
     class Meta:
         model = University
         fields = '__all__'
@@ -500,6 +501,7 @@ class UniversitySerializer(serializers.ModelSerializer):
 # --- Achievement Serializers ---
 class AchievementSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='get_category_display', read_only=True)
+    # icon maydoni CharField bo'lgani uchun ImageField kerak emas
     class Meta:
         model = Achievement
         fields = ('id', 'name', 'description', 'category', 'category_display', 'points_reward', 'icon', 'is_active')
@@ -511,24 +513,28 @@ class UserAchievementSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserAchievement
-        fields = ('id', 'achievement', 'earned_at', 'progress', 'target', 'is_completed', 'progress_percentage', 'created_at')
+        fields = ('id', 'achievement', 'earned_at', 'progress', 'target', 'is_completed', 'progress_percentage', 'created_at') # created_at UserAchievement modeli uchun
         read_only_fields = fields
 
     def get_progress_percentage(self, obj):
-        if obj.target > 0:
-            return round(min(100, (obj.progress / obj.target) * 100), 2)
-        return 0.0
+        if obj.target is not None and obj.target > 0 and obj.progress is not None:
+            return round(min(100, (obj.progress / obj.target) * 100), 1)
+        return 100.0 if obj.is_completed else 0.0
 
 
 # --- Course, Lesson, Review, Enrollment Serializers ---
 class TeacherSerializer(serializers.ModelSerializer):
+    """O'qituvchi haqida qisqa ma'lumot (nested uchun)."""
+    profile_picture = serializers.ImageField(max_length=None, use_url=True, read_only=True)
     class Meta:
         model = User
-        fields = ('id', 'full_name', 'profile_picture', 'about_me') # Add other relevant teacher fields
+        fields = ('id', 'full_name', 'profile_picture', 'about_me')
 
 class LessonSerializer(serializers.ModelSerializer):
+     """Kurs darslari uchun."""
      read_time_display = serializers.SerializerMethodField()
      video_duration_display = serializers.SerializerMethodField()
+     video_file = serializers.FileField(max_length=None, use_url=True, read_only=True)
 
      class Meta:
          model = Lesson
@@ -536,84 +542,94 @@ class LessonSerializer(serializers.ModelSerializer):
                    'duration_minutes', 'video_duration_display', 'is_free_preview', 'read_time_display')
 
      def get_read_time_display(self, obj):
-         if readtime and obj.description:
-             rt = readtime.of_text(obj.description)
-             return rt.text
-         return _("~1 daqiqa") # Default if no description or readtime library
+         if readtime and obj.description: return readtime.of_text(obj.description).text
+         return _("~1 daqiqa")
 
      def get_video_duration_display(self, obj):
         if obj.duration_minutes:
-            if obj.duration_minutes < 60: return f"{obj.duration_minutes} daq"
-            else: return f"{obj.duration_minutes // 60} soat {obj.duration_minutes % 60} daq"
+            mins = obj.duration_minutes
+            return f"{mins // 60} soat {mins % 60} daq" if mins >= 60 else f"{mins} daq"
         return None
 
 class CourseReviewSerializer(serializers.ModelSerializer):
-    user = TeacherSerializer(read_only=True) # Use TeacherSerializer for basic user info
+    user = TeacherSerializer(read_only=True) # User ma'lumoti
     class Meta:
         model = CourseReview
         fields = ('id', 'user', 'rating', 'comment', 'created_at')
         read_only_fields = ('id', 'user', 'created_at')
 
 class CourseListSerializer(serializers.ModelSerializer):
-    subject_name = serializers.CharField(source='subject.name', read_only=True)
+    subject = SubjectSerializer(read_only=True)
     teacher = TeacherSerializer(read_only=True)
     difficulty_display = serializers.CharField(source='get_difficulty_display', read_only=True)
     language_display = serializers.CharField(source='get_language_display', read_only=True)
     price_display = serializers.SerializerMethodField()
     duration_display = serializers.SerializerMethodField()
+    thumbnail = serializers.ImageField(max_length=None, use_url=True, read_only=True)
+    # Student uchun progressni ham qo'shamiz (agar login qilgan bo'lsa)
+    user_progress = serializers.SerializerMethodField()
 
     class Meta:
         model = Course
-        fields = ('id', 'title', 'subject', 'subject_name', 'thumbnail', 'teacher', 'price', 'price_display',
+        fields = ('id', 'title', 'subject', 'thumbnail', 'teacher', 'price', 'price_display',
                   'duration_weeks', 'duration_display', 'difficulty', 'difficulty_display', 'language', 'language_display',
-                  'rating', 'enrolled_students_count', 'lessons_count')
-        read_only_fields = fields[:1] + fields[2:] # Make subject writable
+                  'rating', 'enrolled_students_count', 'lessons_count', 'user_progress') # user_progress qo'shildi
+        read_only_fields = fields
 
     def get_price_display(self, obj):
-        return _("Bepul") if obj.price <= 0 else f"{obj.price:,.0f} so'm".replace(',', ' ')
+        return _("Bepul") if obj.price <= 0 else f"{int(obj.price):,} so'm".replace(',', ' ')
 
     def get_duration_display(self, obj):
         return f"{obj.duration_weeks} hafta" if obj.duration_weeks else _("Noma'lum")
 
+    def get_user_progress(self, obj):
+         # Contextdan requestni olish
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # Foydalanuvchining ushbu kursdagi progressini olish
+            enrollment = UserCourseEnrollment.objects.filter(user=request.user, course=obj).first()
+            return enrollment.progress if enrollment else 0.0
+        return None # Agar login qilmagan bo'lsa
+
+
 class CourseDetailSerializer(CourseListSerializer):
-    lessons = LessonSerializer(many=True, read_only=True, source='lessons.all') # Ensure ordering
-    reviews = serializers.SerializerMethodField() # Get limited reviews
+    lessons = LessonSerializer(many=True, read_only=True, source='get_ordered_lessons') # Model methodidan olish
+    reviews = serializers.SerializerMethodField() # Oxirgi bir nechtasini olish
     enrollment_status = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta(CourseListSerializer.Meta):
-        fields = CourseListSerializer.Meta.fields + (
+        # user_progress ni olib tashlaymiz, chunki enrollment_status ichida bor
+        fields = [f for f in CourseListSerializer.Meta.fields if f != 'user_progress'] + [
             'description', 'requirements', 'what_you_learn', 'has_certificate', 'status', 'status_display',
             'lessons', 'reviews', 'enrollment_status', 'last_updated'
-        )
-        read_only_fields = ('id', 'subject_name', 'thumbnail', 'teacher', 'price_display', 'duration_display',
-                          'difficulty_display', 'language_display', 'rating', 'enrolled_students_count',
-                          'lessons_count', 'lessons', 'reviews', 'enrollment_status', 'last_updated', 'status_display')
+        ]
+        read_only_fields = fields # Detail viewda hamma narsa read-only
 
     def get_reviews(self, obj):
-        # Get latest 5 reviews for detail view
-        latest_reviews = obj.reviews.all()[:5]
+        latest_reviews = obj.reviews.all()[:5] # Oxirgi 5 ta sharh
         return CourseReviewSerializer(latest_reviews, many=True, context=self.context).data
 
     def get_enrollment_status(self, obj):
         user = self.context['request'].user
         if user.is_authenticated:
             try:
-                enrollment = UserCourseEnrollment.objects.get(user=user, course=obj)
+                enrollment = UserCourseEnrollment.objects.select_related('last_accessed_lesson').get(user=user, course=obj)
                 return {
                     'is_enrolled': True,
                     'progress': enrollment.progress,
                     'completed_at': enrollment.completed_at,
-                    'enrollment_id': enrollment.id, # Useful for tracking progress
-                    'last_accessed_lesson_id': enrollment.last_accessed_lesson_id
+                    'enrollment_id': enrollment.id,
+                    'last_accessed_lesson': LessonSerializer(enrollment.last_accessed_lesson, context=self.context).data if enrollment.last_accessed_lesson else None
                 }
             except UserCourseEnrollment.DoesNotExist:
-                return {'is_enrolled': False, 'progress': 0.0}
-        return {'is_enrolled': False, 'progress': 0.0} # For anonymous users
+                pass
+        return {'is_enrolled': False, 'progress': 0.0, 'completed_at': None, 'enrollment_id': None, 'last_accessed_lesson': None}
 
 class CourseEnrollmentSerializer(serializers.ModelSerializer):
-    course = CourseListSerializer(read_only=True)
-    # user = UserSerializer(read_only=True, fields=('id', 'full_name')) # Not needed if listing for current user
+    """Foydalanuvchining kurs yozuvlari uchun."""
+    course = CourseListSerializer(read_only=True) # Kurs haqida qisqa ma'lumot
+    last_accessed_lesson = LessonSerializer(read_only=True) # Oxirgi kirilgan dars
 
     class Meta:
         model = UserCourseEnrollment
@@ -621,17 +637,13 @@ class CourseEnrollmentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 class EnrollActionSerializer(serializers.Serializer):
-    # No input needed, just trigger the action
-    pass
+    pass # No fields needed, just triggers action
 
 class LeaveReviewSerializer(serializers.ModelSerializer):
      class Meta:
          model = CourseReview
          fields = ('rating', 'comment')
-         extra_kwargs = {
-             'rating': {'required': True},
-             'comment': {'required': False, 'allow_blank': True},
-         }
+         extra_kwargs = {'rating': {'required': True}, 'comment': {'required': False, 'allow_blank': True}}
 
 class UpdateProgressSerializer(serializers.Serializer):
     lesson_id = serializers.IntegerField(required=True)
@@ -653,6 +665,7 @@ class ScheduleItemSerializer(serializers.ModelSerializer):
 class NotificationSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(source='get_notification_type_display', read_only=True)
     time_since = serializers.SerializerMethodField()
+    # related_object = serializers.SerializerMethodField() # Yoki alohida serializerlar
 
     class Meta:
         model = Notification
@@ -662,33 +675,42 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     def get_time_since(self, obj):
         from django.utils.timesince import timesince
-        return timesince(obj.created_at, now=timezone.now()) + _(" oldin")
+        now_aware = timezone.now()
+        if timezone.is_naive(obj.created_at): # Agar naive bo'lsa
+             created_at_aware = timezone.make_aware(obj.created_at, timezone.get_default_timezone())
+        else:
+             created_at_aware = obj.created_at
+        return timesince(created_at_aware, now=now_aware) + _(" oldin")
+
+    # def get_related_object(self, obj): # Murakkabroq, lekin foydali
+    #     if obj.notification_type == 'test_result' and obj.related_object_id:
+    #         try: return UserTestResultSerializer(UserTestResult.objects.get(pk=obj.related_object_id)).data
+    #         except UserTestResult.DoesNotExist: return None
+    #     # ... boshqa turlar uchun ...
+    #     return None
 
 
-# --- Admin Panel Serializers ---
+# ==============================================
+#               ADMIN PANEL SERIALIZERS
+# ==============================================
+
+# --- Admin Dashboard Serializers ---
 
 class AdminDashboardStatsSerializer(serializers.Serializer):
-    total_users = serializers.IntegerField()
-    total_users_change = serializers.FloatField()
-    active_students = serializers.IntegerField()
-    active_students_change = serializers.FloatField()
-    total_tests_taken = serializers.IntegerField()
-    total_tests_taken_change = serializers.FloatField()
-    total_revenue = serializers.DecimalField(max_digits=15, decimal_places=2)
-    total_revenue_change = serializers.FloatField()
+    """Admin paneli bosh sahifasidagi katta kartalar uchun."""
+    total_users = ValueChangeTargetIntSerializer(read_only=True)
+    active_students = ValueChangeTargetIntSerializer(read_only=True)
+    # total_tests maydoni qo'shilgan edi avvalgi kodda, uni ham ValueChangeTargetIntSerializer qilamiz
+    total_tests_taken = ValueChangeTargetIntSerializer(read_only=True) # Yoki total_tests
+    total_revenue = ValueChangeTargetDecimalSerializer(read_only=True) # Decimal uchun alohida serializer
 
 class AdminLastRegisteredUserSerializer(serializers.ModelSerializer):
     status_display = serializers.SerializerMethodField()
-
     class Meta:
         model = User
         fields = ('id', 'full_name', 'phone_number', 'date_joined', 'status_display')
-
     def get_status_display(self, obj):
-        # `obj` bu yerda `User` ob'ekti bo'ladi
-        if obj.is_blocked:
-            return _("Bloklangan")
-        return _("Faol") if obj.is_active else _("Nofaol")
+        return _("Bloklangan") if obj.is_blocked else (_("Faol") if obj.is_active else _("Nofaol"))
 
 class AdminLatestTestSerializer(serializers.ModelSerializer):
     subject_name = serializers.CharField(source='subject.name', read_only=True)
@@ -697,50 +719,47 @@ class AdminLatestTestSerializer(serializers.ModelSerializer):
         model = Test
         fields = ('id', 'title', 'subject_name', 'created_at', 'status_display')
 
-class AdminLatestPaymentSerializer(PaymentSerializer):
+class AdminLatestPaymentSerializer(PaymentSerializer): # Mavjudidan foydalanamiz
      user_full_name = serializers.CharField(source='user.full_name', read_only=True)
      class Meta(PaymentSerializer.Meta):
          fields = ('id', 'user_full_name', 'amount_display', 'type_display', 'created_at', 'status_display')
+
+class AdminDashboardLatestListsSerializer(serializers.Serializer):
+    """Admin paneli bosh sahifasidagi oxirgi ro'yxatlar uchun."""
+    latest_users = AdminLastRegisteredUserSerializer(many=True, read_only=True)
+    latest_tests = AdminLatestTestSerializer(many=True, read_only=True)
+    latest_payments = AdminLatestPaymentSerializer(many=True, read_only=True)
+
+
+# --- Admin CRUD Serializers ---
 
 class AdminUserListSerializer(serializers.ModelSerializer):
      role_display = serializers.CharField(source='get_role_display', read_only=True)
      status_display = serializers.SerializerMethodField()
      class Meta:
         model = User
-        fields = ('id', 'full_name', 'phone_number', 'email', 'date_joined', 'role', 'role_display', 'status_display')
+        fields = ('id', 'full_name', 'phone_number', 'email', 'date_joined', 'role', 'role_display', 'status_display') # role ni ham qo'shdim
         read_only_fields = fields
-
      def get_status_display(self, obj):
-         if obj.is_blocked: return _("Bloklangan")
-         return _("Faol") if obj.is_active else _("Nofaol")
-
-# Use UserSerializer for Admin User Detail
+         return _("Bloklangan") if obj.is_blocked else (_("Faol") if obj.is_active else _("Nofaol"))
 
 class AdminUserCreateSerializer(serializers.ModelSerializer):
-    """Admin tomonidan yangi foydalanuvchi yaratish uchun serializer (password2 va is_blockedsiz)."""
-    # Majburiy maydonlar
     email = serializers.EmailField(required=True)
     full_name = serializers.CharField(required=True)
     phone_number = serializers.CharField(required=True)
     role = serializers.ChoiceField(choices=User.ROLE_CHOICES, required=True)
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-
-    # Admin belgilashi mumkin bo'lgan status va ruxsatlar (ixtiyoriy)
     is_active = serializers.BooleanField(required=False, default=True)
     is_staff = serializers.BooleanField(required=False, default=False)
     is_superuser = serializers.BooleanField(required=False, default=False)
-    # is_blocked = serializers.BooleanField(...) # <<<--- BU QATOR O'CHIRILDI ---<<<
 
     class Meta:
         model = User
         fields = (
             'email', 'full_name', 'phone_number', 'role',
-            'password',
-            'is_active', 'is_staff', 'is_superuser'
-            # <<<--- 'is_blocked' O'CHIRILDI ---<<<
-        )
+            'password', 'is_active', 'is_staff', 'is_superuser'
+        ) # is_blocked bu yerda yo'q
 
-    # validate_phone_number va validate_email (avvalgidek)
     def validate_phone_number(self, value):
         if User.objects.filter(phone_number=value).exists():
             raise serializers.ValidationError(_("Bu telefon raqam allaqachon mavjud."))
@@ -754,64 +773,36 @@ class AdminUserCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
-        # Kuchli parol tekshiruvi
-        try:
-            password_validation.validate_password(data['password'])
-        except Exception as e:
-             raise serializers.ValidationError({"password": list(e.messages)})
+        try: password_validation.validate_password(data['password'])
+        except Exception as e: raise serializers.ValidationError({"password": list(e.messages)})
         return data
 
     def create(self, validated_data):
-        # UserManager.create_user ga faqat fields da ko'rsatilgan ma'lumotlar uzatiladi
-        # create_user is_blocked ni False qilib yaratadi (User modelidagi default)
+        # is_blocked avtomatik False bo'ladi
         user = User.objects.create_user(**validated_data)
-        # is_blocked ni alohida o'rnatish kerak emas
-        # user.is_blocked = validated_data.get('is_blocked', False) # <<<--- BU QATOR O'CHIRILDI ---<<<
-        # user.save(update_fields=['is_blocked']) # <<<--- BU QATOR O'CHIRILDI ---<<<
         return user
 
-
 class AdminUserUpdateSerializer(serializers.ModelSerializer):
-    """Admin tomonidan mavjud foydalanuvchini tahrirlash uchun."""
     class Meta:
         model = User
-        # Admin o'zgartirishi mumkin bo'lgan BARCHA maydonlar (paroldan tashqari)
         fields = (
             'email', 'full_name', 'phone_number',
             'birth_date', 'gender', 'profile_picture',
             'grade', 'region', 'study_place', 'address',
             'target_university', 'target_faculty', 'about_me',
-            'role', 'balance', # Admin balansni ham o'zgartira olsinmi? (Ehtiyot bo'lish kerak)
+            'role', 'balance', # Admin balansni o'zgartira olsin
             'is_active', 'is_blocked', 'is_staff', 'is_superuser'
         )
-        extra_kwargs = {
-            # Barcha maydonlar PATCH uchun ixtiyoriy bo'lishi kerak
-            'email': {'required': False},
-            'full_name': {'required': False},
-            'phone_number': {'required': False},
-            'birth_date': {'required': False, 'allow_null': True},
-            'gender': {'required': False, 'allow_null': True},
-            'profile_picture': {'required': False, 'allow_null': True},
-            'grade': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'region': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'study_place': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'address': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'target_university': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'target_faculty': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'about_me': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'role': {'required': False},
-            'balance': {'required': False}, # Ehtiyotkorlik bilan ishlatish kerak
-            'is_active': {'required': False},
-            'is_blocked': {'required': False},
-            'is_staff': {'required': False},
-            'is_superuser': {'required': False},
-        }
+        extra_kwargs = { field: {'required': False} for field in fields } # All optional for PATCH
+        extra_kwargs['profile_picture'] = {'required': False, 'allow_null': True}
+        extra_kwargs['birth_date'] = {'required': False, 'allow_null': True}
+        extra_kwargs['gender'] = {'required': False, 'allow_null': True}
+        # ... other fields allowing null/blank should be specified ...
 
-    # Email va telefon raqam uchun validation (avvalgidek)
+    # --- Validations for email and phone (ensure uniqueness excluding self) ---
     def validate_phone_number(self, value):
          if value and User.objects.filter(phone_number=value).exclude(pk=self.instance.pk).exists():
              raise serializers.ValidationError(_("Bu telefon raqam boshqa foydalanuvchiga tegishli."))
-         # Format tekshiruvi
          if value and (not value.startswith('+998') or len(value) != 13 or not value[1:].isdigit()):
               raise serializers.ValidationError(_("Telefon raqam +998XXXXXXXXX formatida bo'lishi kerak."))
          return value
@@ -821,205 +812,257 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
              raise serializers.ValidationError(_("Bu email manzili boshqa foydalanuvchiga tegishli."))
          return value
 
+    def validate_balance(self, value):
+        # Balans manfiy bo'lishi mumkin emas (agar shart shunday bo'lsa)
+        if value < 0:
+            raise serializers.ValidationError(_("Balans manfiy bo'lishi mumkin emas."))
+        return value
+
 
 class AdminTestListSerializer(TestListSerializer):
-    # TestListSerializerdan meros oladi, qo'shimcha admin maydonlari
      status_display = serializers.CharField(source='get_status_display', read_only=True)
      created_by_name = serializers.CharField(source='created_by.full_name', read_only=True, default='')
-     # `status` maydoni TestListSerializerdan keladi va tahrirlash uchun kerak
+     subject = SubjectSerializer(read_only=True) # Show nested subject
+
      class Meta(TestListSerializer.Meta):
-        fields = ('id', 'title', 'subject_name', 'question_count', 'difficulty_display',
+        fields = ('id', 'title', 'subject', 'question_count', 'difficulty_display', # subject_name/icon o'rniga subject
                   'created_at', 'status', 'status_display', 'created_by_name')
-        # Admin ro'yxatdan turib statusni o'zgartirishi uchun read_only dan olib tashlaymiz
-        read_only_fields = ('id', 'subject_name', 'question_count', 'difficulty_display',
+        read_only_fields = ('id', 'subject', 'question_count', 'difficulty_display', # status ni tahrirlash mumkin
                           'created_at', 'status_display', 'created_by_name')
 
 
 class AdminTestCreateUpdateSerializer(serializers.ModelSerializer):
-    # Bu serializerda status yozish uchun mavjud
-    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all()) # Select uchun ID ishlatish
+    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all())
 
     class Meta:
         model = Test
-        fields = ('title', 'subject', 'description', # 'question_count' avtomatik hisoblanadi
-                  'difficulty', 'test_type',
+        # question_count ni olib tashlaymiz, u savollar qo'shilganda/o'chirilganda yangilanadi
+        fields = ('title', 'subject', 'description', 'difficulty', 'test_type',
                   'price', 'reward_points', 'time_limit', 'status')
         extra_kwargs = {
-            # Agar update paytida ba'zi maydonlar ixtiyoriy bo'lishi kerak bo'lsa
              'description': {'required': False, 'allow_blank': True},
-             'price': {'required': False},
-             'reward_points': {'required': False},
+             'price': {'required': False, 'default': 0},
+             'reward_points': {'required': False, 'default': 0},
+             'time_limit': {'required': False, 'default': 60},
         }
 
     def validate_price(self, value):
-        # Narx manfiy bo'lmasligi kerak
-        if value < 0:
-             raise serializers.ValidationError(_("Narx manfiy bo'lishi mumkin emas."))
+        if value < 0: raise serializers.ValidationError(_("Narx manfiy bo'lishi mumkin emas."))
         return value
 
     def validate(self, data):
-        # Agar tur 'free' bo'lsa, narxni 0 qilish
+        # `instance` mavjud bo'lsa (update) yoki yo'q bo'lsa (create) type va price ni olish
         test_type = data.get('test_type', getattr(self.instance, 'test_type', None))
-        price = data.get('price', getattr(self.instance, 'price', 0))
+        price = data.get('price', getattr(self.instance, 'price', None))
+
+        # Agar price kiritilmagan bo'lsa, default 0 deb olamiz (yoki instance dagi qiymat)
+        if price is None: price = 0
 
         if test_type == 'free':
-            data['price'] = 0
+            data['price'] = decimal.Decimal('0.00')
         elif price <= 0 and test_type == 'premium':
-            # Agar premium bo'lsa va narx kiritilmagan yoki 0 bo'lsa xatolik (yoki default narx belgilash)
-             raise serializers.ValidationError({'price': _("Premium test uchun narx kiritilishi shart.")})
+             raise serializers.ValidationError({'price': _("Premium test uchun narx 0 dan katta bo'lishi kerak.")})
+        # Agar price kiritilgan bo'lsa, uni Decimal ga o'tkazish
+        if 'price' in data: data['price'] = decimal.Decimal(data['price'])
+
         return data
 
 class AdminQuestionSerializer(serializers.ModelSerializer):
+     difficulty_display = serializers.CharField(source='get_difficulty_display', read_only=True)
+     correct_answer_display = serializers.CharField(source='get_correct_answer_display', read_only=True)
+
      class Meta:
          model = Question
-         fields = ('id', 'test', 'order', 'question_text', 'difficulty', 'option_a', 'option_b',
-                   'option_c', 'option_d', 'correct_answer', 'explanation', 'points')
-         read_only_fields = ('id',)
-         # 'test' will be set based on the URL in the viewset or passed in data for creation
-         extra_kwargs = {'test': {'required': False}}
+         fields = ('id', 'test', 'order', 'question_text', 'difficulty', 'difficulty_display', 'option_a', 'option_b',
+                   'option_c', 'option_d', 'correct_answer', 'correct_answer_display', 'explanation', 'points')
+         read_only_fields = ('id', 'difficulty_display', 'correct_answer_display')
+         # 'test' maydonini faqat yaratishda (data orqali) yoki update da (instance dan) o'qish uchun qoldiramiz
+         extra_kwargs = {'test': {'required': False, 'read_only': True}}
 
 
-class AdminMaterialListSerializer(MaterialSerializer):
-     status_display = serializers.CharField(source='get_status_display', read_only=True)
-     class Meta(MaterialSerializer.Meta):
-        fields = ('id', 'title', 'subject_name', 'material_type', 'file_format', 'size_display',
-                  'downloads_count', 'status', 'status_display', 'uploaded_at', 'uploaded_by_name') # Added status
+class AdminMaterialListSerializer(serializers.ModelSerializer):
+    subject = SubjectSerializer(read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    type_display = serializers.CharField(source='get_material_type_display', read_only=True)
+    format_display = serializers.CharField(source='get_file_format_display', read_only=True)
+    size_display = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.CharField(source='uploaded_by.full_name', read_only=True, default='')
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Material
+        fields = ('id', 'title', 'subject', 'material_type', 'type_display', 'file_format', 'format_display',
+                  'size_display', 'downloads_count', 'status', 'status_display', 'uploaded_at', 'uploaded_by_name', 'file_url')
+        read_only_fields = ('id', 'subject', 'type_display', 'format_display', 'size_display',
+                          'downloads_count', 'uploaded_at', 'uploaded_by_name', 'status_display', 'file_url')
+
+    def get_size_display(self, obj):
+        # Avvalgi kod bilan bir xil
+        if obj.size_mb is not None: return f"{obj.size_mb:.1f} MB" if obj.size_mb >= 1 else f"{obj.size_mb * 1024:.0f} KB"
+        elif obj.file:
+             try: return f"{obj.file.size / (1024*1024):.1f} MB" if obj.file.size >= 1024*1024 else f"{obj.file.size / 1024:.0f} KB"
+             except Exception: return "-"
+        return "-"
+
+    def get_file_url(self, obj):
+         request = self.context.get('request')
+         if obj.file and request:
+             return request.build_absolute_uri(obj.file.url)
+         return obj.link # Agar fayl yo'q bo'lsa link
 
 class AdminMaterialCreateUpdateSerializer(serializers.ModelSerializer):
+    # file maydonini alohida handle qilamiz
+    file = serializers.FileField(required=False, allow_null=True, max_length=None, use_url=True)
+    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all())
+
     class Meta:
         model = Material
         fields = ('title', 'subject', 'description', 'material_type', 'file_format', 'file', 'link',
                   'size_mb', 'status', 'is_free', 'price')
         extra_kwargs = {
-            'file': {'required': False, 'allow_null': True},
+            # file required=False qilindi
             'link': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'size_mb': {'required': False, 'allow_null': True},
+            'size_mb': {'required': False, 'allow_null': True}, # Avto hisoblash yaxshiroq
             'description': {'required': False, 'allow_blank': True},
+            'is_free': {'required': False},
+            'price': {'required': False},
              }
 
     def validate(self, data):
-        file_format = data.get('file_format', self.instance.file_format if self.instance else None)
-        file = data.get('file') # Check if file is being uploaded
+        file_format = data.get('file_format', getattr(self.instance, 'file_format', None))
+        file = data.get('file') # Yuklanayotgan fayl
         link = data.get('link')
-        # Get existing file/link if updating and not provided
         instance_file = getattr(self.instance, 'file', None) if self.instance else None
-        instance_link = getattr(self.instance, 'link', None) if self.instance else None
 
-        if file_format == 'link' and not link:
-             if not instance_link: # Only raise error if creating new or removing existing link
-                raise serializers.ValidationError({"link": _("Format 'link' bo'lsa, havola kiritilishi shart.")})
-        # Check if file is provided when format is not link
-        # This needs careful handling for updates: only require file if it's a new instance or if file_format changes from 'link'
-        elif file_format != 'link' and file is None: # 'file is None' means no new file uploaded
-            if not self.instance or not instance_file: # Creating new or no existing file
-                 raise serializers.ValidationError({"file": _("Format 'link' bo'lmasa, fayl yuklanishi shart.")})
-            # If format changes from 'link' to something else, file is needed
-            elif self.instance and instance_link and not instance_file:
-                 raise serializers.ValidationError({"file": _("Format 'link' dan o'zgartirilsa, fayl yuklanishi shart.")})
-        # If format is link, clear the file field
-        elif file_format == 'link':
-             data['file'] = None
+        if file_format == 'link':
+            if not link: raise serializers.ValidationError({"link": _("Format 'link' bo'lsa, havola kiritilishi shart.")})
+            data['file'] = None # Faylni tozalash
+        elif file is None and not instance_file: # Agar yangi yoki eski fayl yo'q bo'lsa
+             if not self.instance: # Faqat yaratishda xatolik beramiz
+                raise serializers.ValidationError({"file": _("Fayl yuklanishi shart (format 'link' emas).")})
+        elif file is not None: # Agar yangi fayl yuklansa
+             data['link'] = None # Linkni tozalash
+             # Hajmni avto hisoblash
+             try: data['size_mb'] = round(file.size / (1024 * 1024), 2)
+             except: data['size_mb'] = None # Hajmni olib bo'lmadi
 
-        is_free = data.get('is_free', getattr(self.instance, 'is_free', True) if self.instance else True)
-        price = data.get('price', getattr(self.instance, 'price', 0) if self.instance else 0)
+        is_free = data.get('is_free', getattr(self.instance, 'is_free', True))
+        price = data.get('price', getattr(self.instance, 'price', None))
+        if price is None: price = decimal.Decimal('0.00')
+        else: price = decimal.Decimal(price) # Decimal ga o'tkazish
 
-        if is_free:
-            data['price'] = 0.00
-        elif price <= 0:
-             raise serializers.ValidationError({"price": _("Pullik material uchun narx musbat bo'lishi kerak.")})
+        if is_free: data['price'] = decimal.Decimal('0.00')
+        elif price <= 0: raise serializers.ValidationError({"price": _("Pullik material uchun narx musbat bo'lishi kerak.")})
+        data['price'] = price # Validatsiyadan o'tgan narxni qaytarish
 
         return data
 
+# Admin Payment (ReadOnly) uses PaymentSerializer
 
 # --- Admin Statistics Serializers ---
-class BaseStatSerializer(serializers.Serializer):
-    total = serializers.IntegerField()
-    change_percentage = serializers.FloatField(allow_null=True) # Allow null if no previous data
+class AdminUserStatisticsDataSerializer(serializers.Serializer):
+    users_graph = GraphDataPointSerializer(many=True, read_only=True)
+    new_users = DetailedStatSerializer(read_only=True)
+    active_users = DetailedStatSerializer(read_only=True)
+    average_activity = DetailedCharStatSerializer(read_only=True) # Value endi CharField
 
-class DetailedStatSerializer(serializers.Serializer):
-    value = serializers.IntegerField()
-    change_percentage = serializers.FloatField(allow_null=True)
-    target = serializers.IntegerField(allow_null=True) # Optional target
+class AdminTestStatisticsDataSerializer(serializers.Serializer):
+    tests_graph = GraphDataPointSerializer(many=True, read_only=True)
+    total_tests = DetailedStatSerializer(read_only=True)
+    tests_taken = DetailedStatSerializer(read_only=True)
+    average_score = DetailedStatSerializer(read_only=True) # Value default Int (yoki Float)
 
-class GraphDataPointSerializer(serializers.Serializer):
-    date = serializers.DateField() # Or DateTimeField
-    value = serializers.IntegerField()
+class AdminPaymentStatisticsDataSerializer(serializers.Serializer):
+    payments_graph = GraphDataPointSerializer(many=True, read_only=True)
+    # DetailedDecimalStatSerializer ISHLATILADI:
+    total_income = DetailedDecimalStatSerializer(read_only=True)
+    total_expenses = DetailedDecimalStatSerializer(read_only=True)
+    average_payment = DetailedDecimalStatSerializer(read_only=True)
 
-# class AdminDashboardStatsSerializer(serializers.Serializer):
-#     total_users = DetailedStatSerializer()
-#     active_students = DetailedStatSerializer()
-#     total_tests = DetailedStatSerializer() # Or tests taken
-#     total_revenue = DetailedStatSerializer()
-class AdminUserStatisticsDetailSerializer(serializers.Serializer): # Read-only bo'lgani uchun oddiy Serializerdan meros olamiz
-    completed_tests = serializers.IntegerField()
-    average_score = serializers.FloatField()
-    total_payments = serializers.DecimalField(max_digits=12, decimal_places=2)
-    # Agar graph_data ham bo'lsa:
-    # graph_data = GraphDataPointSerializer(many=True, read_only=True) # Agar GraphDataPointSerializer mavjud bo'lsa
+class AdminCourseStatisticsDataSerializer(serializers.Serializer):
+    courses_graph = GraphDataPointSerializer(many=True, read_only=True)
+    total_courses = DetailedStatSerializer(read_only=True)
+    enrollments = DetailedStatSerializer(read_only=True)
+    completions = DetailedStatSerializer(read_only=True)
 
-    class Meta:
-         read_only_fields = ('completed_tests', 'average_score', 'total_payments') # Faqat o'qish uchun
+class AdminCombinedStatisticsSerializer(serializers.Serializer):
+    users = AdminUserStatisticsDataSerializer(read_only=True)
+    tests = AdminTestStatisticsDataSerializer(read_only=True)
+    payments = AdminPaymentStatisticsDataSerializer(read_only=True)
+    courses = AdminCourseStatisticsDataSerializer(read_only=True)
 
-
-class AdminUserStatisticsSerializer(serializers.Serializer):
-     users_graph = GraphDataPointSerializer(many=True)
-     new_users = DetailedStatSerializer()
-     active_users = DetailedStatSerializer()
-     average_activity = serializers.CharField() # e.g., "24 min"
-
-class AdminTestStatisticsSerializer(serializers.Serializer):
-     tests_graph = GraphDataPointSerializer(many=True)
-     total_tests = DetailedStatSerializer()
-     tests_taken = DetailedStatSerializer()
-     average_score = DetailedStatSerializer() # Value as percentage
-
-class AdminPaymentStatisticsSerializer(serializers.Serializer):
-     payments_graph = GraphDataPointSerializer(many=True)
-     total_income = DetailedStatSerializer()
-     total_expenses = DetailedStatSerializer() # If tracking expenses
-     average_payment = DetailedStatSerializer()
-
-# Serializer for adding balance by admin
-import decimal
+class AdminUserStatisticsDetailSerializer(serializers.Serializer):
+    """Admin user detail page > Statistics tab uchun"""
+    completed_tests = serializers.IntegerField(read_only=True)
+    average_score = serializers.FloatField(read_only=True)
+    total_payments = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
 class AdminAddBalanceSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=decimal.Decimal('0.01'))
     description = serializers.CharField(max_length=255, required=False, allow_blank=True)
 
-# Serializers for Admin CRUD operations on other models (University, Achievement, Course, etc.)
-# Use existing serializers or create specific Admin versions if needed.
-class AdminUniversitySerializer(UniversitySerializer): # Can inherit or be specific
-     class Meta(UniversitySerializer.Meta):
-         pass # Keep all fields for admin
+# --- Admin CRUD Serializers for other models ---
+# (University, Achievement, Course, Lesson - avvalgidek yoki moslashtirilgan)
+class AdminUniversitySerializer(UniversitySerializer): pass
+class AdminAchievementSerializer(AchievementSerializer): pass
 
-class AdminAchievementSerializer(AchievementSerializer):
-     class Meta(AchievementSerializer.Meta):
-         pass
+class AdminCourseCreateUpdateSerializer(serializers.ModelSerializer):
+    """Admin Kurs yaratish/tahrirlash uchun."""
+    subject = serializers.PrimaryKeyRelatedField(queryset=Subject.objects.all())
+    teacher = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(role='teacher'), allow_null=True, required=False) # Agar o'qituvchi roli bo'lsa
+    thumbnail = serializers.ImageField(max_length=None, use_url=True, required=False, allow_null=True)
 
-class AdminCourseSerializer(CourseDetailSerializer): # Use detail for admin view/update
-    class Meta(CourseDetailSerializer.Meta):
-        read_only_fields = ('id', 'subject_name', 'teacher', 'price_display', 'duration_display', # Keep teacher read-only or use ID
-                          'difficulty_display', 'language_display', 'rating', 'enrolled_students_count',
-                          'lessons_count', 'lessons', 'reviews', 'enrollment_status', 'last_updated', 'status_display')
-        # Allow admin to edit most fields
-        # Teacher might be set via ID
+    class Meta:
+        model = Course
+        # Read-only bo'lgan hisoblanuvchi maydonlarni olib tashlaymiz
+        exclude = ('created_at', 'last_updated', 'rating', 'enrolled_students_count', 'lessons_count')
+        extra_kwargs = {
+            'description': {'required': False, 'allow_blank': True},
+            'requirements': {'required': False, 'allow_blank': True},
+            'what_you_learn': {'required': False, 'allow_blank': True},
+            'price': {'required': False, 'default': 0.00},
+            'duration_weeks': {'required': False, 'allow_null': True},
+            'has_certificate': {'required': False},
+            'status': {'required': False},
+        }
+    # Narx validatsiyasi (AdminTestCreateUpdateSerializer ga o'xshash)
+    def validate_price(self, value):
+        if value < 0: raise serializers.ValidationError(_("Narx manfiy bo'lishi mumkin emas."))
+        return decimal.Decimal(value)
 
-class AdminLessonSerializer(LessonSerializer):
-     class Meta(LessonSerializer.Meta):
-        pass # Allow editing all fields
+class AdminLessonSerializer(serializers.ModelSerializer):
+    """Admin dars yaratish/tahrirlash uchun."""
+    video_file = serializers.FileField(max_length=None, use_url=True, required=False, allow_null=True)
 
+    class Meta:
+        model = Lesson
+        fields = ('id', 'course', 'order', 'title', 'description', 'video_url', 'video_file',
+                  'duration_minutes', 'is_free_preview')
+        read_only_fields = ('id',)
+        # course URL dan keladi, order avtomatik belgilanadi
+        extra_kwargs = {
+            'course': {'required': False, 'read_only': True},
+            'order': {'required': False, 'read_only': True},
+            'video_url': {'required': False, 'allow_blank': True},
+            'duration_minutes': {'required': False, 'allow_null': True},
+            'description': {'required': False, 'allow_blank': True},
+            }
 
-class AdminDashboardLatestListsSerializer(serializers.Serializer):
-    latest_users = serializers.ListField(child=serializers.DictField(), read_only=True)
-    latest_tests = serializers.ListField(child=serializers.DictField(), read_only=True)
-    latest_payments = serializers.ListField(child=serializers.DictField(), read_only=True)
+    def validate(self, data):
+         # Video URL yoki Fayl bo'lishi kerak (lekin ikkalasi ham bo'lishi shart emas)
+         video_url = data.get('video_url', getattr(self.instance, 'video_url', None))
+         video_file = data.get('video_file') # Yangi yuklanayotgan fayl
+         instance_file = getattr(self.instance, 'video_file', None) if self.instance else None
 
+         if not video_url and not video_file and not instance_file:
+             # Agar update bo'lsa va eski fayl ham bo'lmasa yoki create bo'lsa
+             # raise serializers.ValidationError(_("Dars uchun Video URL yoki Video Fayl kiritilishi kerak."))
+             pass # Ikkalasi ham ixtiyoriy bo'lishi mumkin
 
+         if video_url and video_file is not None: # Agar yangi fayl ham kelsa, URL ustunroq
+            data['video_file'] = None
+         elif video_file is not None: # Agar faqat fayl kelsa
+             data['video_url'] = None
+             # Duration ni avto olish mumkin (lekin murakkab)
 
-
-class ValueChangeTargetSerializer(serializers.Serializer): # Yordamchi serializer
-    value = serializers.IntegerField()
-    change_percentage = serializers.FloatField()
-    target = serializers.IntegerField()
-
-
+         return data
