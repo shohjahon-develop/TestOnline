@@ -15,6 +15,8 @@ from rest_framework.exceptions import ValidationError, NotFound, PermissionDenie
 from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser, IsAuthenticatedOrReadOnly
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
+from django.db.models.functions import TruncDate # Grafik uchun
+from .utils import get_date_ranges # Yordamchi funksiyani import qilamiz
 
 from .models import (
     User, Subject, Test, Question, UserTestResult, UserAnswer, Material, Payment,
@@ -506,26 +508,71 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 # IsAdminUser permission class yuqorida import qilingan
 
 # --- Admin Dashboard Views ---
+def _calculate_percentage_change(current_value, previous_value):
+    if previous_value is None or previous_value == 0:
+        return 100.0 if current_value > 0 else 0.0
+    try:
+        current = decimal.Decimal(current_value)
+        previous = decimal.Decimal(previous_value)
+        if previous == 0: # No'lga bo'lish xatosini oldini olish
+             return 100.0 if current > 0 else 0.0
+        change = ((current - previous) / previous) * 100
+        return round(float(change), 1)
+    except (TypeError, decimal.InvalidOperation, decimal.DivisionByZero):
+         return 0.0
+
 class AdminDashboardStatsView(generics.GenericAPIView):
     permission_classes = [IsAdminUser]
     serializer_class = AdminDashboardStatsSerializer
 
+    # Foiz hisoblash funksiyasini shu classga ko'chiramiz yoki import qilamiz
+    _calculate_percentage_change = _calculate_percentage_change
+
     def get(self, request, *args, **kwargs):
-        # ... (Statistika hisoblash logikasi, foizlarni hisoblash kerak) ...
-        total_users = User.objects.count()
-        active_students = User.objects.filter(role='student', is_active=True, is_blocked=False).count()
-        total_tests_taken = UserTestResult.objects.filter(status='completed').count()
-        total_revenue = Payment.objects.filter(status='successful', amount__gt=0).aggregate(total=Sum('amount'))['total'] or decimal.Decimal(0)
-        # Example change calculation (replace with actual logic based on a time period)
+        period = request.query_params.get('period', 'month') # 'week', 'month', 'quarter', 'year'
+        try:
+            start_current, end_current, start_previous, end_previous = get_date_ranges(period)
+        except ValueError: # Agar period noto'g'ri bo'lsa
+            return Response({"error": "Invalid period parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Joriy davr hisoblashlari ---
+        total_users_current = User.objects.count() # Bu davrga bog'liq emas
+        active_students_current = User.objects.filter(role='student', is_active=True, is_blocked=False).count() # Joriy snapshot
+        total_revenue_current_agg = Payment.objects.filter(
+            status='successful', amount__gt=0, created_at__gte=start_current, created_at__lte=end_current
+        ).aggregate(total=Sum('amount'))
+        total_revenue_current = total_revenue_current_agg['total'] or decimal.Decimal(0)
+
+        # --- Oldingi davr hisoblashlari (faqat foiz uchun) ---
+        # Foydalanuvchi soni o'sishi uchun umumiy sonni solishtiramiz
+        total_users_previous = User.objects.filter(date_joined__lt=start_current).count()
+        # Faol studentlar o'sishi (oldingi davrda faol bo'lganlar bilan solishtirish)
+        # active_students_previous = User.objects.filter(role='student', is_active=True, is_blocked=False, last_login__gte=start_previous, last_login__lt=end_previous).count() # Bu murakkab
+        active_students_previous = User.objects.filter(role='student', is_active=True, is_blocked=False).count() # Joriy snapshotni oldingi snapshot bilan solishtirish uchun alohida log yozish kerak bo'lishi mumkin. Hozircha o'sishni 0 deb olamiz.
+        active_students_change = 0.0 # Placeholder, chunki oldingi snapshotni olish qiyin
+
+        total_revenue_previous_agg = Payment.objects.filter(
+            status='successful', amount__gt=0, created_at__gte=start_previous, created_at__lt=end_previous # Eksklyuziv tugash
+        ).aggregate(total=Sum('amount'))
+        total_revenue_previous = total_revenue_previous_agg['total'] or decimal.Decimal(0)
+
+        # --- Foizlar ---
+        total_users_change = self._calculate_percentage_change(total_users_current, total_users_previous) # Bu aslida davr ichidagi o'sish emas, umumiy o'sish
+        # active_students_change yuqorida 0 deb olindi
+        total_revenue_change = self._calculate_percentage_change(total_revenue_current, total_revenue_previous)
+
+        # --- Maqsadlar ---
+        total_users_target = 8000
+        active_students_target = 6000
+        total_revenue_target = decimal.Decimal('35000000.00')
+
+        # --- Serializer uchun data ---
         data = {
-            'total_users': total_users, 'total_users_change': 12.0,
-            'active_students': active_students, 'active_students_change': 8.0,
-            'total_tests_taken': total_tests_taken, 'total_tests_taken_change': 15.0,
-            'total_revenue': total_revenue, 'total_revenue_change': 18.0,
+            'total_users': {'value': total_users_current, 'change_percentage': total_users_change, 'target': total_users_target},
+            'active_students': {'value': active_students_current, 'change_percentage': active_students_change, 'target': active_students_target},
+            'total_revenue': {'value': total_revenue_current, 'change_percentage': total_revenue_change, 'target': total_revenue_target},
         }
-        # Serializerni ishlatish
         serializer = self.get_serializer(data)
-        # serializer.is_valid(raise_exception=True) # Agar serializerda validation bo'lsa
         return Response(serializer.data)
 
 class AdminDashboardLatestListsView(generics.GenericAPIView):
@@ -548,78 +595,149 @@ class AdminDashboardLatestListsView(generics.GenericAPIView):
 # BU VIEWLAR UCHUN SERIALIZERLARNI TO'G'RI YARATISH VA DATA NI O'SHALARGA MOSLASH KERAK
 class AdminUserStatisticsView(generics.GenericAPIView):
     permission_classes = [IsAdminUser]
-    serializer_class = AdminUserStatisticsSerializer  # Serializer qo'shildi
+    serializer_class = AdminUserStatisticsSerializer
+
+    _calculate_percentage_change = _calculate_percentage_change # Yordamchi funksiya
 
     def get(self, request, *args, **kwargs):
-        # Foydalanuvchi statistikasini hisoblash
+        period = request.query_params.get('period', 'month')
+        try:
+            start_current, end_current, start_previous, end_previous = get_date_ranges(period)
+        except ValueError:
+            return Response({"error": "Invalid period parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
         users = User.objects.all()
-        new_users = users.filter(date_joined__gte=timezone.now() - timedelta(days=30)).count()
-        active_users = users.filter(is_active=True, is_blocked=False).count()
-        users_graph = (
-            users
-            .filter(date_joined__lte=timezone.now())
-            .extra(select={'date': 'date(date_joined)'}).values('date')
-            .annotate(value=Count('id')).order_by('date')[:30]
+
+        # Yangi foydalanuvchilar (davr ichida)
+        new_users_current = users.filter(date_joined__gte=start_current, date_joined__lte=end_current).count()
+        new_users_prev = users.filter(date_joined__gte=start_previous, date_joined__lt=end_previous).count()
+        new_users_change = self._calculate_percentage_change(new_users_current, new_users_prev)
+
+        # Faol foydalanuvchilar (davr ichida kirganlar yoki joriy faollar)
+        active_users_current = users.filter(is_active=True, is_blocked=False).count() # Joriy umumiy faollar
+        # Oldingi davrdagi faollar (solishtirish uchun)
+        # active_users_prev = ...
+        active_users_change = 8.0 # Placeholder
+
+        # O'rtacha faollik (placeholder)
+        average_activity_current_minutes = 24
+        average_activity_change = 5.0 # Placeholder
+
+        # Grafik (joriy davr boshidan)
+        users_graph_qs = (
+            users.filter(date_joined__gte=start_current, date_joined__lte=end_current)
+            .annotate(date=TruncDate('date_joined'))
+            .values('date').annotate(value=Count('id')).order_by('date')
         )
-        average_activity = "24 min"  # Bu yerda haqiqiy hisoblash kerak bo'ladi
 
         data = {
-            'users_graph': users_graph,
-            'new_users': {'value': new_users, 'change_percentage': 10.0, 'target': 1000},
-            'active_users': {'value': active_users, 'change_percentage': 5.0, 'target': 500},
-            'average_activity': average_activity,
+            'users_graph': list(users_graph_qs),
+            'new_users': {'value': new_users_current, 'change_percentage': new_users_change},
+            'active_users': {'value': active_users_current, 'change_percentage': active_users_change},
+            'average_activity': f"{average_activity_current_minutes} min",
+             # Foizni alohida yuborish
+             # 'average_activity_change': average_activity_change
         }
         serializer = self.get_serializer(data)
         return Response(serializer.data)
 
 class AdminTestStatisticsView(generics.GenericAPIView):
     permission_classes = [IsAdminUser]
-    serializer_class = AdminTestStatisticsSerializer  # Serializer qo'shildi
+    serializer_class = AdminTestStatisticsSerializer
+    _calculate_percentage_change = _calculate_percentage_change
 
     def get(self, request, *args, **kwargs):
-        # Test statistikasini hisoblash
+        period = request.query_params.get('period', 'month')
+        try:
+            start_current, end_current, start_previous, end_previous = get_date_ranges(period)
+        except ValueError:
+            return Response({"error": "Invalid period parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
         tests = Test.objects.all()
-        total_tests = tests.count()
-        tests_taken = UserTestResult.objects.filter(status='completed').count()
-        avg_score = UserTestResult.objects.filter(status='completed').aggregate(avg=Avg('percentage'))['avg'] or 0
-        tests_graph = (
-            UserTestResult.objects
-            .filter(start_time__lte=timezone.now())
-            .extra(select={'date': 'date(start_time)'}).values('date')
-            .annotate(value=Count('id')).order_by('date')[:30]
+        results = UserTestResult.objects.filter(status='completed')
+
+        # Joriy davr
+        total_tests_current = tests.filter(created_at__gte=start_current, created_at__lte=end_current).count() # Davrda yaratilgan testlar
+        tests_taken_current = results.filter(start_time__gte=start_current, start_time__lte=end_current).count()
+        avg_score_current_agg = results.filter(start_time__gte=start_current, start_time__lte=end_current).aggregate(avg=Avg('percentage'))
+        avg_score_current = avg_score_current_agg['avg'] or 0
+
+        # Oldingi davr
+        total_tests_prev = tests.filter(created_at__gte=start_previous, created_at__lt=end_previous).count()
+        tests_taken_prev = results.filter(start_time__gte=start_previous, start_time__lt=end_previous).count()
+        avg_score_prev_agg = results.filter(start_time__gte=start_previous, start_time__lt=end_previous).aggregate(avg=Avg('percentage'))
+        avg_score_prev = avg_score_prev_agg['avg'] or 0
+
+        # Foizlar
+        total_tests_change = self._calculate_percentage_change(total_tests_current, total_tests_prev)
+        tests_taken_change = self._calculate_percentage_change(tests_taken_current, tests_taken_prev)
+        avg_score_change = self._calculate_percentage_change(avg_score_current, avg_score_prev)
+
+        # Grafik (davr ichida topshirilgan testlar)
+        tests_graph_qs = (
+            results.filter(start_time__gte=start_current, start_time__lte=end_current)
+            .annotate(date=TruncDate('start_time'))
+            .values('date').annotate(value=Count('id')).order_by('date')
         )
 
         data = {
-            'tests_graph': tests_graph,
-            'total_tests': {'value': total_tests, 'change_percentage': 8.0, 'target': 100},
-            'tests_taken': {'value': tests_taken, 'change_percentage': 12.0, 'target': 500},
-            'average_score': {'value': round(avg_score, 2), 'change_percentage': 3.0, 'target': 80},
+            'tests_graph': list(tests_graph_qs),
+            'total_tests': {'value': Test.objects.count(), 'change_percentage': total_tests_change}, # Umumiy sonni ham qaytarish mumkin
+            'tests_taken': {'value': tests_taken_current, 'change_percentage': tests_taken_change},
+            'average_score': {'value': round(avg_score_current, 2), 'change_percentage': avg_score_change},
+             # Targetlar kerak bo'lsa qo'shiladi
         }
         serializer = self.get_serializer(data)
         return Response(serializer.data)
 
 class AdminPaymentStatisticsView(generics.GenericAPIView):
     permission_classes = [IsAdminUser]
-    serializer_class = AdminPaymentStatisticsSerializer  # Serializer qo'shildi
+    serializer_class = AdminPaymentStatisticsSerializer
+    _calculate_percentage_change = _calculate_percentage_change
 
     def get(self, request, *args, **kwargs):
-        # To'lov statistikasini hisoblash
-        payments = Payment.objects.filter(status='successful')
-        total_income = payments.filter(amount__gt=0).aggregate(total=Sum('amount'))['total'] or 0
-        total_expenses = payments.filter(amount__lt=0).aggregate(total=Sum('amount'))['total'] or 0
-        avg_payment = payments.filter(amount__gt=0).aggregate(avg=Avg('amount'))['avg'] or 0
-        payments_graph = (
-            payments
-            .filter(created_at__lte=timezone.now())
-            .extra(select={'date': 'date(created_at)'}).values('date')
-            .annotate(value=Count('id')).order_by('date')[:30]
+        period = request.query_params.get('period', 'month')
+        try:
+            start_current, end_current, start_previous, end_previous = get_date_ranges(period)
+        except ValueError:
+            return Response({"error": "Invalid period parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+        payments_success = Payment.objects.filter(status='successful')
+
+        # Joriy davr
+        income_current_agg = payments_success.filter(amount__gt=0, created_at__gte=start_current, created_at__lte=end_current).aggregate(total=Sum('amount'))
+        income_current = income_current_agg['total'] or decimal.Decimal(0)
+        expenses_current_agg = payments_success.filter(amount__lt=0, created_at__gte=start_current, created_at__lte=end_current).aggregate(total=Sum('amount'))
+        expenses_current = abs(expenses_current_agg['total'] or decimal.Decimal(0))
+        avg_payment_current_agg = payments_success.filter(amount__gt=0, created_at__gte=start_current, created_at__lte=end_current).aggregate(avg=Avg('amount'))
+        avg_payment_current = avg_payment_current_agg['avg'] or decimal.Decimal(0)
+
+        # Oldingi davr
+        income_prev_agg = payments_success.filter(amount__gt=0, created_at__gte=start_previous, created_at__lt=end_previous).aggregate(total=Sum('amount'))
+        income_prev = income_prev_agg['total'] or decimal.Decimal(0)
+        expenses_prev_agg = payments_success.filter(amount__lt=0, created_at__gte=start_previous, created_at__lt=end_previous).aggregate(total=Sum('amount'))
+        expenses_prev = abs(expenses_prev_agg['total'] or decimal.Decimal(0))
+        avg_payment_prev_agg = payments_success.filter(amount__gt=0, created_at__gte=start_previous, created_at__lt=end_previous).aggregate(avg=Avg('amount'))
+        avg_payment_prev = avg_payment_prev_agg['avg'] or decimal.Decimal(0)
+
+        # Foizlar
+        income_change = self._calculate_percentage_change(income_current, income_prev)
+        expenses_change = self._calculate_percentage_change(expenses_current, expenses_prev)
+        avg_payment_change = self._calculate_percentage_change(avg_payment_current, avg_payment_prev)
+
+        # Grafik (davrdagi to'lovlar soni)
+        payments_graph_qs = (
+            payments_success.filter(created_at__gte=start_current, created_at__lte=end_current)
+            .annotate(date=TruncDate('created_at'))
+            .values('date').annotate(value=Count('id')).order_by('date')
         )
 
         data = {
-            'payments_graph': payments_graph,
-            'total_income': {'value': total_income, 'change_percentage': 15.0, 'target': 1000000},
-            'total_expenses': {'value': abs(total_expenses), 'change_percentage': 5.0, 'target': 500000},
-            'average_payment': {'value': round(avg_payment, 2), 'change_percentage': 2.0, 'target': 50000},
+            'payments_graph': list(payments_graph_qs),
+            'total_income': {'value': income_current, 'change_percentage': income_change},
+            'total_expenses': {'value': expenses_current, 'change_percentage': expenses_change},
+            'average_payment': {'value': round(avg_payment_current, 2), 'change_percentage': avg_payment_change},
+            # Targetlar kerak bo'lsa qo'shiladi
         }
         serializer = self.get_serializer(data)
         return Response(serializer.data)
