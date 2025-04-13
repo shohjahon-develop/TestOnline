@@ -588,18 +588,23 @@ class AdminDashboardStatsView(generics.GenericAPIView):
 
 class AdminDashboardLatestListsView(generics.GenericAPIView):
     permission_classes = [IsAdminUser]
-    serializer_class = AdminDashboardLatestListsSerializer  # Serializer qo'shildi
+    serializer_class = AdminDashboardLatestListsSerializer # Bu serializer nested ishlarni qiladi
 
     def get(self, request, *args, **kwargs):
         latest_users = User.objects.order_by('-date_joined')[:5]
         latest_tests = Test.objects.select_related('subject').order_by('-created_at')[:5]
         latest_payments = Payment.objects.select_related('user').order_by('-created_at')[:5]
+
+        # Model instance'larini to'g'ridan-to'g'ri uzatamiz, .data NI O'CHIRAMIZ
         data = {
-            'latest_users': AdminLastRegisteredUserSerializer(latest_users, many=True).data,
-            'latest_tests': AdminLatestTestSerializer(latest_tests, many=True).data,
-            'latest_payments': AdminLatestPaymentSerializer(latest_payments, many=True, context={'request': request}).data,
+            'latest_users': latest_users,
+            'latest_tests': latest_tests,
+            'latest_payments': latest_payments,
         }
-        serializer = self.get_serializer(data)
+
+        # Asosiy serializerga context'ni berishni unutmaymiz,
+        # chunki ichidagi AdminLatestPaymentSerializer request'ni ishlatadi
+        serializer = self.get_serializer(data, context=self.get_serializer_context()) # self.get_serializer_context() requestni o'z ichiga oladi
         return Response(serializer.data)
 
 # --- Admin Statistics Views (Separate) ---
