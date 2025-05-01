@@ -195,6 +195,8 @@ class UserSerializer(serializers.ModelSerializer):
     gender_display = serializers.CharField(source='get_gender_display', read_only=True, allow_null=True)
     balance_display = serializers.CharField(source='get_balance_display', read_only=True)
     profile_picture = serializers.ImageField(max_length=None, use_url=True, read_only=True)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True,
+                                     style={'input_type': 'password'})
 
     class Meta:
         model = User
@@ -203,9 +205,30 @@ class UserSerializer(serializers.ModelSerializer):
             'profile_picture', 'balance', 'balance_display', 'date_joined', 'is_active', 'is_blocked',
             'birth_date', 'gender', 'gender_display', 'grade', 'region', 'study_place',
             'address', 'target_university', 'target_faculty', 'about_me',
-            'settings', 'rating'
+            'settings', 'rating','password'
         )
         read_only_fields = ('id', 'email', 'role', 'role_display', 'balance', 'balance_display', 'date_joined', 'is_active', 'is_blocked', 'settings', 'rating', 'profile_picture')
+
+        def to_representation(self, instance):
+            # Standart representationni olamiz
+            representation = super().to_representation(instance)
+
+            request = self.context.get('request')
+            view = self.context.get('view')  # View contextini olamiz
+
+            # Agar request mavjud bo'lsa va foydalanuvchi authenticated bo'lsa va staff bo'lsa
+            # va action 'retrieve' bo'lsa (ya'ni /api/admin/users/{id}/ GET requesti bo'lsa)
+            if request and hasattr(request, 'user') and request.user.is_staff and view and view.action == 'retrieve':
+                # Password maydonini javobga qo'shamiz (hashed shaklda)
+                # Model instance dan passwordni olamiz
+                representation['password'] = instance.password
+            else:
+                # Aks holda, password maydonini javobdan olib tashlaymiz
+                # Bu List view (/api/admin/users/), oddiy user profili (/api/profile/)
+                # va GET bo'lmagan requestlar uchun passwordni yashiradi
+                representation.pop('password', None)  # Agar mavjud bo'lsa olib tashlaydi
+
+            return representation
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     """For user updating their own profile."""
@@ -783,21 +806,52 @@ class AdminUserCreateSerializer(serializers.ModelSerializer):
         return user
 
 class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    """For admin updating user profile and potentially password."""
+    profile_picture = serializers.ImageField(max_length=None, use_url=True, required=False, allow_null=True)
+    # YANGI: Admin parol o'zgartirishi uchun password maydonlarini qo'shamiz
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True,
+                                     style={'input_type': 'password'}, label=_("Yangi parol"))
+    confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=True,
+                                             style={'input_type': 'password'}, label=_("Yangi parolni tasdiqlang"))
+
     class Meta:
         model = User
+        # Admin panelda tahrirlanadigan maydonlar
         fields = (
             'email', 'full_name', 'phone_number',
             'birth_date', 'gender', 'profile_picture',
             'grade', 'region', 'study_place', 'address',
             'target_university', 'target_faculty', 'about_me',
-            'role', 'balance', # Admin balansni o'zgartira olsin
-            'is_active', 'is_blocked', 'is_staff', 'is_superuser'
+            'role', 'balance',  # Admin balansni o'zgartira olsin
+            'is_active', 'is_blocked', 'is_staff', 'is_superuser',
+            'password', 'confirm_password'  # <- fields ga qo'shdik
         )
-        extra_kwargs = { field: {'required': False} for field in fields } # All optional for PATCH
-        extra_kwargs['profile_picture'] = {'required': False, 'allow_null': True}
-        extra_kwargs['birth_date'] = {'required': False, 'allow_null': True}
-        extra_kwargs['gender'] = {'required': False, 'allow_null': True}
-        # ... other fields allowing null/blank should be specified ...
+        extra_kwargs = {
+            # Hamma maydon PATCH uchun ixtiyoriy bo'lishi mumkin
+            'email': {'required': False},  # Emailni ham admin o'zgartirsin
+            'full_name': {'required': False},
+            'phone_number': {'required': False},
+            'profile_picture': {'required': False, 'allow_null': True},
+            'birth_date': {'required': False, 'allow_null': True},
+            'gender': {'required': False, 'allow_null': True},
+            'grade': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'region': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'study_place': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'address': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_university': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'target_faculty': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'about_me': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'role': {'required': False},
+            'balance': {'required': False},
+            'is_active': {'required': False},
+            'is_blocked': {'required': False},
+            'is_staff': {'required': False},
+            'is_superuser': {'required': False},
+
+            # Password maydonlari faqat yozish uchun va ixtiyoriy
+            'password': {'write_only': True, 'required': False, 'allow_null': True, 'allow_blank': True},
+            'confirm_password': {'write_only': True, 'required': False, 'allow_null': True, 'allow_blank': True},
+        }
 
     # --- Validations for email and phone (ensure uniqueness excluding self) ---
     def validate_phone_number(self, value):
@@ -817,6 +871,66 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError(_("Balans manfiy bo'lishi mumkin emas."))
         return value
+
+    def validate(self, data):
+        # Avval ModelSerializer ning standart validatsiyalarini chaqiramiz
+        # (masalan, choice fieldlar, max_length, unique cheklar)
+        # Bu yerda unique cheklar exclude(pk=self.instance.pk) bilan to'g'ri ishlaydi
+        validated_data = super().validate(data)
+
+        # YANGI: Agar password o'zgartirishga harakat bo'lsa, validatsiya qilamiz
+        new_password = validated_data.get('password')
+        confirm_password = validated_data.get('confirm_password')
+
+        # Agar yangi parol kiritilgan bo'lsa (confirm_password kiritilmagan bo'lsa ham)
+        # yoki faqat confirm_password kiritilgan bo'lsa
+        if new_password or confirm_password:
+            if not new_password:
+                raise serializers.ValidationError({"password": _("Yangi parol kiritilishi shart.")})
+            if not confirm_password:
+                raise serializers.ValidationError({"confirm_password": _("Yangi parolni tasdiqlash shart.")})
+
+            if new_password != confirm_password:
+                raise serializers.ValidationError({"confirm_password": _("Yangi parollar mos kelmadi.")})
+
+            # Django ning parol murakkablik validatorlaridan foydalanamiz
+            # self.instance - bu tahrirlanayotgan User obyekti
+            user_instance = self.instance
+            try:
+                # Agar user instance bo'lmasa (bu create holati - AdminUserCreateSerializer ishlatiladi)
+                # yoki user instance mavjud bo'lsa
+                password_validation.validate_password(new_password, user=user_instance)
+            except Exception as e:
+                # ValidationError xabarlarini to'playmiz va 'password' maydoniga bog'laymiz
+                raise serializers.ValidationError({"password": list(e.messages)})
+
+        # Muhim: password va confirm_password maydonlarini validated_data dan o'chirib tashlamaymiz!
+        # Ular serializer ning update methodida ishlatiladi.
+
+        return validated_data  # O'zgartirilgan validated_data ni qaytaramiz
+
+    # YANGI: update methodini override qilib, parolni o'zgartirish logikasini qo'shamiz
+    def update(self, instance, validated_data):
+        # validated_data ichidan passwordni olib tashlaymiz, agar u berilgan bo'lsa
+        new_password = validated_data.pop('password', None)
+        # confirm_password ni ham shunchaki olib tashlaymiz
+        validated_data.pop('confirm_password', None)
+
+        # Agar new_password berilgan bo'lsa, parolni o'zgartiramiz
+        if new_password:
+            instance.set_password(new_password)
+            # Optional: Eski tokenlarni o'chirish (logout qilish)
+            try:
+                from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+                tokens = OutstandingToken.objects.filter(user=instance)
+                for token in tokens:
+                    BlacklistedToken.objects.get_or_create(token=token)
+            except Exception as e:
+                print(f"Warning/Error blacklisting tokens for user {instance.pk}: {e}")
+
+        # Qolgan maydonlarni ModelSerializer ning standart update methodi bilan yangilaymiz
+        # validate_data endi password va confirm_passwordni o'z ichiga olmaydi
+        return super().update(instance, validated_data)
 
 
 class AdminTestListSerializer(TestListSerializer):

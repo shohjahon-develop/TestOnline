@@ -752,14 +752,15 @@ class AdminUserViewSet(viewsets.ModelViewSet):
     ordering = ['-date_joined']
 
     def get_serializer_class(self):
-        # FAQAT standart actionlar uchun serializer qaytaramiz
         if self.action == 'list':
             return AdminUserListSerializer
         elif self.action == 'create':
             return AdminUserCreateSerializer
         elif self.action in ['update', 'partial_update']:
-            return AdminUserUpdateSerializer
+            # PUT/PATCH /api/admin/users/{id}/ uchun
+            return AdminUserUpdateSerializer # <<< AdminUserUpdateSerializer ishlatiladi
         elif self.action == 'retrieve':
+            # GET /api/admin/users/{id}/ uchun
             return UserSerializer
         # Custom actionlar uchun serializer qaytarmaymiz,
         # swagger_auto_schema ga ishonamiz
